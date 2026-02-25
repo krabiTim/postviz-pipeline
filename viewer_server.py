@@ -18,6 +18,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 PROJECTS_DIR = Path.home() / "postviz-pipeline" / "projects"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -31,6 +32,10 @@ app_viewer.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+# Serve static assets (three.min.js, PLYLoader.js, OrbitControls.js)
+app_viewer.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────

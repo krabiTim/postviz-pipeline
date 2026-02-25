@@ -30,12 +30,16 @@ STYLE_SUFFIXES = {
 }
 
 
-def get_viewer_iframe(shot_name: str) -> str:
+def get_viewer_html(shot_name: str) -> str:
+    url = f"http://localhost:7861/viewer?shot={shot_name}"
     return (
-        f'<iframe src="http://localhost:7861/viewer?shot={shot_name}" '
-        f'width="100%" height="600px" '
-        f'style="border:1px solid #333;border-radius:4px;background:#0d0d0d;" '
-        f'allow="accelerometer"></iframe>'
+        f'<div style="font-family:monospace;padding:10px 0">'
+        f'<a href="{url}" target="_blank" '
+        f'style="display:inline-block;padding:8px 18px;background:#0d2a0d;'
+        f'border:1px solid #3a7a3a;color:#8f8;text-decoration:none;'
+        f'border-radius:3px;font-size:13px">&#9654; Open Camera Path Viewer</a>'
+        f'&nbsp;&nbsp;<span style="color:#555;font-size:11px">{url}</span>'
+        f'</div>'
     )
 
 
@@ -194,7 +198,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
     yield (
         "\n".join(log_lines[-200:]),
         state,
-        gr.update(value=get_viewer_iframe(shot.name)),
+        gr.update(value=get_viewer_html(shot.name)),
         gr.update(value=quality, visible=True),
         gr.update(visible=True),
     )
