@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PostViz Camera Path Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #ccc; font-family: monospace; overflow: hidden; }
+
+  #canvas-container { position: fixed; inset: 0; }
+
+  /* Top bar */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; height: 40px;
+    background: rgba(0,0,0,0.75); border-bottom: 1px solid #333;
+    display: flex; align-items: center; gap: 12px; padding: 0 12px;
+    z-index: 10;
+  }
+  #topbar h1 { font-size: 13px; color: #fff; letter-spacing: 0.05em; white-space: nowrap; }
+  #shot-select {
+    background: #1a1a1a; border: 1px solid #444; color: #ddd;
+    padding: 3px 8px; font-family: monospace; font-size: 12px;
+    border-radius: 3px; cursor: pointer; min-width: 200px;
+  }
+  #shot-select:focus { outline: 1px solid #666; }
+  #load-btn {
+    background: #2a4a2a; border: 1px solid #4a8a4a; color: #8f8;
+    padding: 3px 10px; font-family: monospace; font-size: 12px;
+    border-radius: 3px; cursor: pointer;
+  }
+  #load-btn:hover { background: #3a6a3a; }
+  #status-msg { font-size: 11px; color: #888; flex: 1; }
+
+  /* Info panel */
+  #info-panel {
+    position: fixed; top: 48px; right: 12px;
+    background: rgba(0,0,0,0.72); border: 1px solid #333;
+    border-radius: 4px; padding: 10px 14px; min-width: 200px;
+    font-size: 11px; line-height: 1.8; z-index: 10;
+  }
+  #info-panel .label { color: #666; }
+  #info-panel .val   { color: #ccc; }
+  #info-panel .good  { color: #8f8; }
+  #info-panel .warn  { color: #fa0; }
+  #info-panel .bad   { color: #f44; }
+  #info-panel hr { border: none; border-top: 1px solid #2a2a2a; margin: 6px 0; }
+
+  /* Timeline */
+  #timeline {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 48px;
+    background: rgba(0,0,0,0.82); border-top: 1px solid #333;
+    display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    z-index: 10;
+  }
+  #play-btn {
+    background: #1a2a3a; border: 1px solid #3a6a9a; color: #6af;
+    width: 30px; height: 26px; font-size: 14px; border-radius: 3px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  #play-btn:hover { background: #2a3a4a; }
+  #scrubber {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 4px; border-radius: 2px; background: #333; cursor: pointer;
+    outline: none;
+  }
+  #scrubber::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: #6af; cursor: pointer;
+    box-shadow: 0 0 4px #06f;
+  }
+  #frame-label { font-size: 11px; color: #888; white-space: nowrap; min-width: 80px; }
+  #reset-btn {
+    background: #1a1a1a; border: 1px solid #444; color: #999;
+    padding: 3px 8px; font-family: monospace; font-size: 11px;
+    border-radius: 3px; cursor: pointer;
+  }
+  #reset-btn:hover { background: #2a2a2a; }
+
+  /* Loading overlay */
+  #loading {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    z-index: 100; gap: 16px;
+  }
+  #loading.hidden { display: none; }
+  #loading p { font-size: 13px; color: #aaa; }
+  .spinner {
+    width: 36px; height: 36px; border: 3px solid #333;
+    border-top-color: #6af; border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="topbar">
+  <h1>CAMERA PATH VIEWER</h1>
+  <select id="shot-select"><option value="">— select shot —</option></select>
+  <button id="load-btn">LOAD</button>
+  <span id="status-msg">Select a shot and click LOAD</span>
+</div>
+
+<div id="info-panel">
+  <div><span class="label">Shot: </span><span class="val" id="ip-shot">—</span></div>
+  <div><span class="label">Frames: </span><span class="val" id="ip-frames">—</span></div>
+  <div><span class="label">Registered: </span><span class="val" id="ip-reg">—</span></div>
+  <hr>
+  <div><span class="label">Model: </span><span class="val" id="ip-model">—</span></div>
+  <div><span class="label">Focal: </span><span class="val" id="ip-focal">—</span></div>
+  <div><span class="label">FOV: </span><span class="val" id="ip-fov">—</span></div>
+  <hr>
+  <div><span class="label">Solve error: </span><span id="ip-err">—</span></div>
+  <hr>
+  <div><span class="label">Frame: </span><span class="val" id="ip-frame">—</span></div>
+  <div><span class="label">Reg: </span><span class="val" id="ip-reg2">—</span></div>
+</div>
+
+<div id="timeline">
+  <button id="play-btn">&#9654;</button>
+  <input type="range" id="scrubber" min="0" max="100" value="0" step="1">
+  <span id="frame-label">0 / 0</span>
+  <button id="reset-btn">RESET CAM</button>
+</div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p id="loading-msg">Initialising…</p>
+</div>
+
+<!-- Three.js r128 -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
+
+<script>
+"use strict";
+
+// ── Three.js scene setup ──────────────────────────────────────────────────────
+
+const container = document.getElementById("canvas-container");
+const renderer  = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x0d0d0d);
+container.appendChild(renderer.domElement);
+
+const scene   = new THREE.Scene();
+const camera  = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.01, 2000);
+camera.position.set(0, 3, 12);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance   = 0.05;
+controls.maxDistance   = 500;
+controls.screenSpacePanning = true;
+
+// Grid + axes
+const gridHelper = new THREE.GridHelper(20, 20, 0x222222, 0x1a1a1a);
+scene.add(gridHelper);
+
+const axesHelper = new THREE.AxesHelper(0.5);
+scene.add(axesHelper);
+
+// Ambient light (helps frustum wireframes)
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Scene objects (swapped out on each LOAD) ─────────────────────────────────
+
+let sceneGroup = new THREE.Group();
+scene.add(sceneGroup);
+
+let frameData    = [];    // per-frame info from API
+let totalFrames  = 0;
+let frustums     = [];    // one mesh per frame (some null for unregistered)
+let activeFrustum = null;
+
+// ── Animation state ───────────────────────────────────────────────────────────
+
+let playing    = false;
+let currentFrame = 0;
+let lastTime   = null;
+let fps        = 24.0;
+
+// ── UI refs ───────────────────────────────────────────────────────────────────
+
+const shotSelect  = document.getElementById("shot-select");
+const loadBtn     = document.getElementById("load-btn");
+const statusMsg   = document.getElementById("status-msg");
+const scrubber    = document.getElementById("scrubber");
+const frameLabel  = document.getElementById("frame-label");
+const playBtn     = document.getElementById("play-btn");
+const resetBtn    = document.getElementById("reset-btn");
+const loadingDiv  = document.getElementById("loading");
+const loadingMsg  = document.getElementById("loading-msg");
+
+// ── Populate shot list ────────────────────────────────────────────────────────
+
+async function populateShots() {
+  try {
+    const resp = await fetch("/api/shots");
+    const data = await resp.json();
+    shotSelect.innerHTML = "<option value=''>— select shot —</option>";
+    for (const s of data.shots) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = s;
+      shotSelect.appendChild(opt);
+    }
+    if (data.shots.length > 0) {
+      shotSelect.value = data.shots[0];
+      statusMsg.textContent = `${data.shots.length} shot(s) found`;
+    } else {
+      statusMsg.textContent = "No solved shots found";
+    }
+  } catch (e) {
+    statusMsg.textContent = "Could not reach API";
+  }
+}
+
+// ── Load shot ─────────────────────────────────────────────────────────────────
+
+async function loadShot(shotName) {
+  showLoading("Fetching scene data…");
+
+  // Clear previous scene
+  sceneGroup.removeFromParent();
+  sceneGroup = new THREE.Group();
+  scene.add(sceneGroup);
+  frustums = [];
+  activeFrustum = null;
+  currentFrame = 0;
+  playing = false;
+  playBtn.innerHTML = "&#9654;";
+
+  let sceneData;
+  try {
+    const resp = await fetch(`/api/scene/${encodeURIComponent(shotName)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    sceneData = await resp.json();
+  } catch (e) {
+    hideLoading();
+    statusMsg.textContent = "Scene load failed: " + e.message;
+    return;
+  }
+
+  frameData   = sceneData.camera_path;
+  totalFrames = sceneData.total_frames;
+  fps         = sceneData.fps > 0 ? sceneData.fps : 24.0;
+
+  updateInfoPanel(sceneData);
+
+  // Scrubber
+  scrubber.min   = 0;
+  scrubber.max   = Math.max(0, totalFrames - 1);
+  scrubber.value = 0;
+  updateFrameLabel(0);
+
+  // Build scene geometry
+  await buildScene(sceneData);
+
+  hideLoading();
+  statusMsg.textContent = `Loaded: ${shotName}`;
+  setFrame(0);
+}
+
+// ── Build 3D scene geometry ───────────────────────────────────────────────────
+
+async function buildScene(sceneData) {
+  // 1. Point cloud
+  if (sceneData.ply_url) {
+    await loadPLY(sceneData.ply_url);
+  }
+
+  // 2. Camera path: collect registered positions for spline
+  const registeredFrames = frameData.filter(f => f.registered);
+  if (registeredFrames.length >= 2) {
+    buildCameraPath(registeredFrames);
+  }
+
+  // 3. Frustums for every registered frame
+  const intr = sceneData.intrinsics;
+  for (let i = 0; i < frameData.length; i++) {
+    const f = frameData[i];
+    if (f.registered) {
+      const m = buildFrustumMesh(f, intr, 0.3);
+      if (m) {
+        m.visible = false;
+        sceneGroup.add(m);
+        frustums[i] = m;
+      }
+    } else {
+      frustums[i] = null;
+    }
+  }
+
+  // 4. Frame spheres (small dot per registered frame)
+  const sphereGeo = new THREE.SphereGeometry(0.025, 6, 6);
+  const sphereMat = new THREE.MeshBasicMaterial({ color: 0x4488cc });
+  for (const f of registeredFrames) {
+    const s = new THREE.Mesh(sphereGeo, sphereMat);
+    s.position.set(f.position[0], f.position[1], f.position[2]);
+    sceneGroup.add(s);
+  }
+
+  // 5. Auto-fit orbit target to scene centre
+  if (registeredFrames.length > 0) {
+    let cx = 0, cy = 0, cz = 0;
+    for (const f of registeredFrames) {
+      cx += f.position[0]; cy += f.position[1]; cz += f.position[2];
+    }
+    const n = registeredFrames.length;
+    const centre = new THREE.Vector3(cx/n, cy/n, cz/n);
+    controls.target.copy(centre);
+
+    // Estimate scene span to set camera distance
+    let maxD = 0;
+    for (const f of registeredFrames) {
+      const d = new THREE.Vector3(f.position[0], f.position[1], f.position[2]).distanceTo(centre);
+      if (d > maxD) maxD = d;
+    }
+    const dist = Math.max(maxD * 2.5, 2);
+    camera.position.set(centre.x, centre.y + dist * 0.5, centre.z + dist);
+    controls.update();
+  }
+}
+
+// ── PLY loader ────────────────────────────────────────────────────────────────
+
+function loadPLY(plyUrl) {
+  return new Promise((resolve) => {
+    loadingMsg.textContent = "Loading point cloud…";
+    const loader = new THREE.PLYLoader();
+    loader.load(
+      plyUrl,
+      (geometry) => {
+        geometry.computeBoundingBox();
+        // Vertex colours present if attribute exists
+        const hasColors = geometry.hasAttribute("color");
+        const mat = new THREE.PointsMaterial({
+          size: 0.025,
+          vertexColors: hasColors,
+          color: hasColors ? 0xffffff : 0x88aacc,
+        });
+        const points = new THREE.Points(geometry, mat);
+        sceneGroup.add(points);
+        resolve();
+      },
+      (xhr) => {
+        const pct = xhr.total ? Math.round(xhr.loaded / xhr.total * 100) : "…";
+        loadingMsg.textContent = `Loading point cloud… ${pct}%`;
+      },
+      (err) => {
+        console.warn("PLY load error:", err);
+        resolve(); // non-fatal
+      }
+    );
+  });
+}
+
+// ── Camera path spline ────────────────────────────────────────────────────────
+
+function buildCameraPath(frames) {
+  const pts = frames.map(f => new THREE.Vector3(f.position[0], f.position[1], f.position[2]));
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const splinePts = curve.getPoints(Math.min(pts.length * 8, 800));
+  const geo = new THREE.BufferGeometry().setFromPoints(splinePts);
+  const mat = new THREE.LineBasicMaterial({ color: 0x226688, transparent: true, opacity: 0.6 });
+  const line = new THREE.Line(geo, mat);
+  sceneGroup.add(line);
+}
+
+// ── Frustum geometry ──────────────────────────────────────────────────────────
+// rotation_matrix in JSON is R^T (3×3, row-major = world-from-camera).
+// To transform a camera-space vector v to world space:
+//   world = R^T * v + position
+// where R^T[row][col] means we do: world_x = sum_j R^T[row=0][j] * v[j]
+// i.e. standard matrix-vector product with the stored row-major matrix.
+
+function applyRotT(rotMat, v) {
+  // rotMat is [[r00,r01,r02],[r10,r11,r12],[r20,r21,r22]] (row-major, R^T)
+  const r = rotMat;
+  return [
+    r[0][0]*v[0] + r[0][1]*v[1] + r[0][2]*v[2],
+    r[1][0]*v[0] + r[1][1]*v[1] + r[1][2]*v[2],
+    r[2][0]*v[0] + r[2][1]*v[1] + r[2][2]*v[2],
+  ];
+}
+
+function buildFrustumMesh(frame, intr, scale) {
+  const pos  = frame.position;       // [x,y,z] world
+  const rotT = frame.rotation_matrix; // 3×3 R^T row-major
+
+  // Frustum corners in camera space at depth=scale
+  // Camera convention: +X right, +Y down, +Z forward (COLMAP/OpenCV)
+  const aspect = intr.aspect_ratio || 1.778;
+  const fovY   = (intr.fov_y_deg || 30.0) * Math.PI / 180.0;
+  const halfH  = Math.tan(fovY / 2) * scale;
+  const halfW  = halfH * aspect;
+  const d      = scale;
+
+  const camCorners = [
+    [-halfW, -halfH,  d],  // top-left
+    [ halfW, -halfH,  d],  // top-right
+    [ halfW,  halfH,  d],  // bottom-right
+    [-halfW,  halfH,  d],  // bottom-left
+  ];
+
+  const worldCorners = camCorners.map(c => {
+    const w = applyRotT(rotT, c);
+    return new THREE.Vector3(pos[0]+w[0], pos[1]+w[1], pos[2]+w[2]);
+  });
+  const origin = new THREE.Vector3(pos[0], pos[1], pos[2]);
+
+  // Build line segments: 4 edges from apex, 4 edges of near rectangle
+  const verts = [];
+  for (const wc of worldCorners) {
+    verts.push(origin.x, origin.y, origin.z);
+    verts.push(wc.x, wc.y, wc.z);
+  }
+  // Rectangle
+  for (let i = 0; i < 4; i++) {
+    const a = worldCorners[i];
+    const b = worldCorners[(i+1)%4];
+    verts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  }
+  // Up direction marker: small tick from apex toward camera "up" (-Y cam = up)
+  const upCam = [0, -0.3*scale, 0];
+  const upW   = applyRotT(rotT, upCam);
+  const upTip = new THREE.Vector3(pos[0]+upW[0], pos[1]+upW[1], pos[2]+upW[2]);
+  verts.push(origin.x, origin.y, origin.z, upTip.x, upTip.y, upTip.z);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0xff8800, transparent: true, opacity: 0.85 });
+  return new THREE.LineSegments(geo, mat);
+}
+
+// ── Frame update ──────────────────────────────────────────────────────────────
+
+function setFrame(idx) {
+  idx = Math.max(0, Math.min(totalFrames - 1, idx));
+  currentFrame = idx;
+  scrubber.value = idx;
+  updateFrameLabel(idx);
+
+  // Hide previous frustum
+  if (activeFrustum) {
+    activeFrustum.visible = false;
+  }
+
+  // Show frustum for this frame (or nearest registered)
+  let f = frustums[idx];
+  if (!f) {
+    // Find nearest registered
+    let best = null, bestDist = Infinity;
+    for (let i = 0; i < frustums.length; i++) {
+      if (frustums[i] && Math.abs(i - idx) < bestDist) {
+        bestDist = Math.abs(i - idx);
+        best = frustums[i];
+      }
+    }
+    f = best;
+  }
+  if (f) {
+    f.visible = true;
+    activeFrustum = f;
+  }
+
+  // Info panel: current frame
+  const fd = frameData[idx];
+  if (fd) {
+    document.getElementById("ip-frame").textContent = `${idx + 1} / ${totalFrames}`;
+    document.getElementById("ip-reg2").textContent  = fd.registered ? "YES" : "—";
+  }
+}
+
+function updateFrameLabel(idx) {
+  frameLabel.textContent = `${idx + 1} / ${totalFrames}`;
+}
+
+// ── Info panel ────────────────────────────────────────────────────────────────
+
+function updateInfoPanel(sceneData) {
+  const intr = sceneData.intrinsics || {};
+  const reg  = sceneData.total_registered || 0;
+  const tot  = sceneData.total_frames || 0;
+  const err  = sceneData.solve_error;
+  const pct  = tot > 0 ? Math.round(reg/tot*100) : 0;
+
+  document.getElementById("ip-shot").textContent   = sceneData.shot_name || "—";
+  document.getElementById("ip-frames").textContent  = tot;
+  document.getElementById("ip-reg").textContent     = `${reg} / ${tot} (${pct}%)`;
+  document.getElementById("ip-model").textContent   = intr.model || "—";
+  document.getElementById("ip-focal").textContent   = intr.focal_length ? `${intr.focal_length.toFixed(1)} px` : "—";
+  document.getElementById("ip-fov").textContent     = intr.fov_y_deg    ? `${intr.fov_y_deg.toFixed(1)}°`    : "—";
+
+  const errEl = document.getElementById("ip-err");
+  if (err != null) {
+    const errStr = `${Number(err).toFixed(3)} px`;
+    if (err < 1.0)      { errEl.textContent = errStr; errEl.className = "good"; }
+    else if (err < 2.0) { errEl.textContent = errStr; errEl.className = "warn"; }
+    else                { errEl.textContent = errStr; errEl.className = "bad";  }
+  } else {
+    errEl.textContent = "—"; errEl.className = "val";
+  }
+}
+
+// ── Playback ──────────────────────────────────────────────────────────────────
+
+function togglePlay() {
+  if (totalFrames === 0) return;
+  playing = !playing;
+  playBtn.innerHTML = playing ? "&#9646;&#9646;" : "&#9654;";
+  if (playing && currentFrame >= totalFrames - 1) {
+    currentFrame = 0;
+  }
+  lastTime = null;
+}
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  if (playing && totalFrames > 0) {
+    if (lastTime === null) lastTime = now;
+    const dt = (now - lastTime) / 1000.0;
+    lastTime = now;
+    const nextFrame = currentFrame + dt * fps;
+    if (nextFrame >= totalFrames) {
+      playing = false;
+      playBtn.innerHTML = "&#9654;";
+      setFrame(totalFrames - 1);
+    } else {
+      setFrame(Math.floor(nextFrame));
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+
+// ── Loading overlay helpers ───────────────────────────────────────────────────
+
+function showLoading(msg) {
+  loadingMsg.textContent = msg || "Loading…";
+  loadingDiv.classList.remove("hidden");
+}
+
+function hideLoading() {
+  loadingDiv.classList.add("hidden");
+}
+
+// ── Event wiring ──────────────────────────────────────────────────────────────
+
+loadBtn.addEventListener("click", () => {
+  const shot = shotSelect.value;
+  if (!shot) { statusMsg.textContent = "Select a shot first"; return; }
+  loadShot(shot);
+});
+
+scrubber.addEventListener("input", () => {
+  playing = false;
+  playBtn.innerHTML = "&#9654;";
+  setFrame(parseInt(scrubber.value, 10));
+});
+
+playBtn.addEventListener("click", togglePlay);
+
+resetBtn.addEventListener("click", () => {
+  controls.reset();
+});
+
+// Keyboard shortcuts
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  if (e.key === "ArrowRight") { playing = false; playBtn.innerHTML = "&#9654;"; setFrame(currentFrame + 1); }
+  if (e.key === "ArrowLeft")  { playing = false; playBtn.innerHTML = "&#9654;"; setFrame(currentFrame - 1); }
+  if (e.key === "Home")       { playing = false; playBtn.innerHTML = "&#9654;"; setFrame(0); }
+  if (e.key === "End")        { playing = false; playBtn.innerHTML = "&#9654;"; setFrame(totalFrames - 1); }
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+(async () => {
+  await populateShots();
+  // If embedded with ?shot=... param, select and load that shot
+  const urlShot = new URLSearchParams(window.location.search).get("shot");
+  if (urlShot) {
+    shotSelect.value = urlShot;
+    // If shot isn't in the list yet (new solve just finished), add it
+    if (!shotSelect.value) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = urlShot;
+      shotSelect.appendChild(opt);
+      shotSelect.value = urlShot;
+    }
+    await loadShot(urlShot);
+  } else if (shotSelect.value) {
+    // Standalone: auto-load first shot
+    hideLoading();
+  } else {
+    hideLoading();
+  }
+})();
+</script>
+</body>
+</html>

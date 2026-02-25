@@ -1,0 +1,52 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__FRAME__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Frame" }
+  },
+  "2": {
+    "class_type": "SAM2ModelLoader (segment anything2)",
+    "inputs": {
+      "model_name": "sam2_1_hiera_tiny.pt",
+      "keep_model_loaded": false
+    },
+    "_meta": { "title": "SAM2 Model Loader" }
+  },
+  "3": {
+    "class_type": "GroundingDinoModelLoader (segment anything2)",
+    "inputs": {
+      "model_name": "GroundingDINO_SwinT_OGC (694MB)"
+    },
+    "_meta": { "title": "GroundingDINO Loader" }
+  },
+  "4": {
+    "class_type": "GroundingDinoSAM2Segment (segment anything2)",
+    "inputs": {
+      "sam_model": ["2", 0],
+      "grounding_dino_model": ["3", 0],
+      "image": ["1", 0],
+      "prompt": "person",
+      "threshold": 0.3,
+      "keep_model_loaded": false
+    },
+    "_meta": { "title": "GroundingDINO+SAM2 Segment" }
+  },
+  "5": {
+    "class_type": "MaskToImage",
+    "inputs": {
+      "mask": ["4", 1]
+    },
+    "_meta": { "title": "Mask to Image" }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["5", 0],
+      "filename_prefix": "sam2_mask"
+    },
+    "_meta": { "title": "Save Mask" }
+  }
+}
