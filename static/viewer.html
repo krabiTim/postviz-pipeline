@@ -81,7 +81,7 @@
   #loading {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    z-index: 100; gap: 16px;
+    z-index: 100; gap: 14px;
   }
   #loading.hidden { display: none; }
   #loading p { font-size: 13px; color: #aaa; }
@@ -90,6 +90,13 @@
     border-top-color: #6af; border-radius: 50%; animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #loading-bar-bg {
+    width: 260px; height: 4px; background: #222; border-radius: 2px; overflow: hidden;
+  }
+  #loading-bar {
+    height: 100%; width: 0%; background: #6af; border-radius: 2px;
+    transition: width 0.15s ease;
+  }
 </style>
 </head>
 <body>
@@ -128,6 +135,7 @@
 <div id="loading">
   <div class="spinner"></div>
   <p id="loading-msg">Initialising…</p>
+  <div id="loading-bar-bg"><div id="loading-bar"></div></div>
 </div>
 
 <!-- Three.js r128 -->
@@ -243,9 +251,11 @@ async function loadShot(shotName) {
 
   let sceneData;
   try {
+    showLoading("Fetching scene data…", 5);
     const resp = await fetch(`/api/scene/${encodeURIComponent(shotName)}`);
     if (!resp.ok) throw new Error(await resp.text());
     sceneData = await resp.json();
+    showLoading("Scene data received", 10);
   } catch (e) {
     hideLoading();
     statusMsg.textContent = "Scene load failed: " + e.message;
@@ -275,18 +285,22 @@ async function loadShot(shotName) {
 // ── Build 3D scene geometry ───────────────────────────────────────────────────
 
 async function buildScene(sceneData) {
-  // 1. Point cloud
+  // 1. Point cloud (PLY load dominates — maps to 10–80% of bar)
   if (sceneData.ply_url) {
     await loadPLY(sceneData.ply_url);
+  } else {
+    showLoading("No point cloud available", 80);
   }
 
   // 2. Camera path: collect registered positions for spline
+  showLoading("Building camera path…", 82);
   const registeredFrames = frameData.filter(f => f.registered);
   if (registeredFrames.length >= 2) {
     buildCameraPath(registeredFrames);
   }
 
   // 3. Frustums for every registered frame
+  showLoading(`Building frustums (${registeredFrames.length} cameras)…`, 88);
   const intr = sceneData.intrinsics;
   for (let i = 0; i < frameData.length; i++) {
     const f = frameData[i];
@@ -303,6 +317,7 @@ async function buildScene(sceneData) {
   }
 
   // 4. Frame spheres (small dot per registered frame)
+  showLoading("Placing camera markers…", 94);
   const sphereGeo = new THREE.SphereGeometry(0.025, 6, 6);
   const sphereMat = new THREE.MeshBasicMaterial({ color: 0x4488cc });
   for (const f of registeredFrames) {
@@ -337,13 +352,12 @@ async function buildScene(sceneData) {
 
 function loadPLY(plyUrl) {
   return new Promise((resolve) => {
-    loadingMsg.textContent = "Loading point cloud…";
+    showLoading("Loading point cloud… 0%", 10);
     const loader = new THREE.PLYLoader();
     loader.load(
       plyUrl,
       (geometry) => {
         geometry.computeBoundingBox();
-        // Vertex colours present if attribute exists
         const hasColors = geometry.hasAttribute("color");
         const mat = new THREE.PointsMaterial({
           size: 0.025,
@@ -352,14 +366,21 @@ function loadPLY(plyUrl) {
         });
         const points = new THREE.Points(geometry, mat);
         sceneGroup.add(points);
+        showLoading("Point cloud loaded", 80);
         resolve();
       },
       (xhr) => {
-        const pct = xhr.total ? Math.round(xhr.loaded / xhr.total * 100) : "…";
-        loadingMsg.textContent = `Loading point cloud… ${pct}%`;
+        // Map 0–100% of PLY download to bar range 10–78%
+        const dlPct = xhr.total ? xhr.loaded / xhr.total : 0;
+        const barPct = 10 + Math.round(dlPct * 68);
+        const label = xhr.total
+          ? `Loading point cloud… ${Math.round(dlPct * 100)}%`
+          : "Loading point cloud…";
+        showLoading(label, barPct);
       },
       (err) => {
         console.warn("PLY load error:", err);
+        showLoading("Point cloud unavailable", 80);
         resolve(); // non-fatal
       }
     );
@@ -550,13 +571,17 @@ requestAnimationFrame(animate);
 
 // ── Loading overlay helpers ───────────────────────────────────────────────────
 
-function showLoading(msg) {
+const loadingBar = document.getElementById("loading-bar");
+
+function showLoading(msg, pct) {
   loadingMsg.textContent = msg || "Loading…";
   loadingDiv.classList.remove("hidden");
+  if (pct !== undefined) loadingBar.style.width = Math.round(pct) + "%";
 }
 
 function hideLoading() {
   loadingDiv.classList.add("hidden");
+  loadingBar.style.width = "0%";
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────

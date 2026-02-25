@@ -94,7 +94,8 @@ def do_extract(video_file, state):
 
 def do_colmap_solve(state, progress=gr.Progress()):
     if not state.get("frames_dir"):
-        return "Run frame extraction first.", state, gr.update(), gr.update(), gr.update()
+        yield "Run frame extraction first.", state, gr.update(), gr.update(), gr.update()
+        return
 
     shot = Path(state["shot_dir"])
     workspace = shot / "colmap"
@@ -111,22 +112,62 @@ def do_colmap_solve(state, progress=gr.Progress()):
     t = threading.Thread(target=run, daemon=True)
     t.start()
 
+    # Map --- Step name --- log markers to progress fractions
+    STEP_PROGRESS = {
+        "Feature extraction": (0.05, "Extracting SIFT features…"),
+        "Feature matching":   (0.30, "Matching features…"),
+        "Sparse mapping":     (0.55, "Sparse mapping (this takes a while)…"),
+        "PLY export":         (0.88, "Exporting point cloud…"),
+        "TXT export":         (0.92, "Exporting camera data…"),
+    }
+    step_label = "Starting COLMAP…"
+    last_yield = 0.0
+    progress(0, desc="Starting COLMAP…")
+
     while True:
         try:
-            line = log_q.get(timeout=0.2)
+            line = log_q.get(timeout=0.1)
             if line is None:
                 break
             log_lines.append(line.rstrip())
+
+            # Detect step transitions from --- markers
+            stripped = line.strip()
+            if stripped.startswith("---") and stripped.endswith("---"):
+                for key, (pct, label) in STEP_PROGRESS.items():
+                    if key.lower() in stripped.lower():
+                        step_label = label
+                        progress(pct, desc=label)
+                        break
+
+            # Stream log to UI ~5× per second
+            now = time.time()
+            if now - last_yield > 0.2:
+                last_yield = now
+                yield (
+                    "\n".join(log_lines[-200:]),
+                    state,
+                    gr.update(value=""),
+                    gr.update(value=f"⏳ {step_label}", visible=True),
+                    gr.update(visible=False),
+                )
         except queue.Empty:
             pass
 
     t.join()
+    progress(1.0, desc="Done")
     result = result_holder.get("result", {})
     state["colmap_result"] = result
-    log_text = "\n".join(log_lines[-200:])
 
     if not result.get("success"):
-        return log_text, state, gr.update(value=""), gr.update(value="SOLVE FAILED", visible=True), gr.update(visible=False)
+        yield (
+            "\n".join(log_lines[-200:]),
+            state,
+            gr.update(value=""),
+            gr.update(value="❌ SOLVE FAILED", visible=True),
+            gr.update(visible=False),
+        )
+        return
 
     err = result.get("solve_error") or 0.0
     state["ply_path"] = result.get("ply_path")
@@ -150,7 +191,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
         except Exception as e:
             log_lines.append(f"fps patch failed: {e}")
 
-    return (
+    yield (
         "\n".join(log_lines[-200:]),
         state,
         gr.update(value=get_viewer_iframe(shot.name)),
@@ -490,4 +531,5 @@ with gr.Blocks(title="PostViz Pipeline") as app:
 
 if __name__ == "__main__":
     start_viewer_server_thread()
+    app.queue()
     app.launch(server_name="0.0.0.0", server_port=7860, share=False, theme=gr.themes.Base())
