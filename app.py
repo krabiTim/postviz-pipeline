@@ -7,7 +7,7 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-from colmap_runner import extract_frames, run_colmap_solve, export_for_comfyui
+from colmap_runner import extract_frames, run_colmap_solve, export_for_comfyui, export_per_frame_plys
 from comfyui_api import (
     run_sam2_mask, generate_backgrounds,
     apply_relight, composite_frame, get_available_checkpoints
@@ -194,6 +194,13 @@ def do_colmap_solve(state, progress=gr.Progress()):
             cp_path.write_text(json.dumps(cp, indent=2))
         except Exception as e:
             log_lines.append(f"fps patch failed: {e}")
+
+    # Generate per-frame PLY files for viewer temporal scrubbing
+    try:
+        n_plys = export_per_frame_plys(str(shot))
+        log_lines.append(f"Exported {n_plys} per-frame PLY files")
+    except Exception as e:
+        log_lines.append(f"Per-frame PLY export skipped: {e}")
 
     yield (
         "\n".join(log_lines[-200:]),

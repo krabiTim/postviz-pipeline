@@ -427,6 +427,124 @@ def parse_camera_path(sparse_dir: str, total_frames: int = None) -> dict:
     }
 
 
+def _write_binary_ply(filepath: str, xyz: np.ndarray, rgb: np.ndarray) -> None:
+    """Write binary-little-endian PLY with x,y,z (float32) + r,g,b (uint8) per vertex."""
+    n = len(xyz)
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    ).encode("ascii")
+    dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                   ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    arr = np.empty(n, dtype=dt)
+    arr["x"] = xyz[:, 0]
+    arr["y"] = xyz[:, 1]
+    arr["z"] = xyz[:, 2]
+    arr["red"]   = rgb[:, 0]
+    arr["green"] = rgb[:, 1]
+    arr["blue"]  = rgb[:, 2]
+    with open(filepath, "wb") as fh:
+        fh.write(header)
+        arr.tofile(fh)
+
+
+def export_per_frame_plys(shot_dir: str, workspace_dir: str = None) -> int:
+    """
+    Parse COLMAP images.txt + points3D.txt to generate per-frame PLY files.
+    Each PLY contains only the 3D points visible in that registered frame,
+    giving the viewer a temporal point cloud to scrub through.
+
+    Output directory: {shot_dir}/frames_ply/frame_XXXXXX.ply  (0-based frame index)
+
+    Returns the number of PLY files written.
+    """
+    shot_dir = Path(shot_dir)
+
+    # Locate sparse/0 dir
+    sparse_0 = Path(workspace_dir) / "sparse" / "0" if workspace_dir else \
+               shot_dir / "colmap" / "sparse" / "0"
+
+    points3d_txt = sparse_0 / "points3D.txt"
+    images_txt   = sparse_0 / "images.txt"
+
+    if not points3d_txt.exists() or not images_txt.exists():
+        return 0
+
+    # 1. Parse points3D.txt → {point3d_id: (x, y, z, r, g, b)}
+    points: dict[int, tuple] = {}
+    for line in points3d_txt.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = line.split()
+        pid = int(parts[0])
+        points[pid] = (
+            float(parts[1]), float(parts[2]), float(parts[3]),
+            int(parts[4]),   int(parts[5]),   int(parts[6]),
+        )
+
+    if not points:
+        return 0
+
+    # 2. Parse images.txt: alternate pose_line / pts2d_line
+    raw_lines = [l.strip() for l in images_txt.read_text().splitlines()
+                 if not l.startswith("#") and l.strip()]
+    pose_lines = raw_lines[0::2]
+    pts2d_lines = raw_lines[1::2]
+
+    frames_ply_dir = shot_dir / "frames_ply"
+    frames_ply_dir.mkdir(exist_ok=True)
+
+    count = 0
+    for pose_line, pts2d_line in zip(pose_lines, pts2d_lines):
+        pose_parts = pose_line.split()
+        name = pose_parts[9]
+
+        # 0-based frame index from filename (e.g. frame_000048.png → 47)
+        m = re.search(r"(\d+)", name)
+        frame_idx = int(m.group(1)) - 1 if m else 0
+
+        # Collect visible POINT3D_IDs from the 2D points line
+        pts2d = pts2d_line.split()
+        visible_ids = set()
+        for i in range(2, len(pts2d), 3):
+            pid = int(pts2d[i])
+            if pid != -1:
+                visible_ids.add(pid)
+
+        if not visible_ids:
+            continue
+
+        # Build xyz and rgb arrays
+        pts_xyz = []
+        pts_rgb = []
+        for pid in visible_ids:
+            if pid in points:
+                x, y, z, r, g, b = points[pid]
+                pts_xyz.append([x, y, z])
+                pts_rgb.append([r, g, b])
+
+        if not pts_xyz:
+            continue
+
+        ply_path = frames_ply_dir / f"frame_{frame_idx:06d}.ply"
+        _write_binary_ply(
+            str(ply_path),
+            np.array(pts_xyz, dtype=np.float32),
+            np.array(pts_rgb, dtype=np.uint8),
+        )
+        count += 1
+
+    return count
+
+
 def export_for_comfyui(
     shot_name: str,
     shot_dir: str,

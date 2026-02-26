@@ -194,6 +194,14 @@ let totalFrames  = 0;
 let frustums     = [];    // one mesh per frame (some null for unregistered)
 let activeFrustum = null;
 
+// Per-frame point clouds
+let globalPointCloud = null;   // the static whole-solve PLY
+let framePoints      = [];     // THREE.Points per frame index (null if not loaded)
+let activeFrameCloud = null;   // currently visible frame cloud
+let frameCloudMode   = false;  // true once first frame cloud has loaded
+let framePlyCount    = 0;      // number of per-frame PLYs reported by API
+let currentShotName  = "";     // for frame_ply fetch URL
+
 // ── Animation state ───────────────────────────────────────────────────────────
 
 let playing    = false;
@@ -255,6 +263,13 @@ async function loadShot(shotName) {
   currentFrame = 0;
   playing = false;
   playBtn.innerHTML = "&#9654;";
+  // Reset per-frame cloud state
+  globalPointCloud = null;
+  framePoints = [];
+  activeFrameCloud = null;
+  frameCloudMode = false;
+  framePlyCount = 0;
+  currentShotName = shotName;
 
   let sceneData;
   try {
@@ -269,9 +284,10 @@ async function loadShot(shotName) {
     return;
   }
 
-  frameData   = sceneData.camera_path;
-  totalFrames = sceneData.total_frames;
-  fps         = sceneData.fps > 0 ? sceneData.fps : 24.0;
+  frameData      = sceneData.camera_path;
+  totalFrames    = sceneData.total_frames;
+  fps            = sceneData.fps > 0 ? sceneData.fps : 24.0;
+  framePlyCount  = sceneData.frame_ply_count || 0;
 
   updateInfoPanel(sceneData);
 
@@ -337,7 +353,12 @@ async function buildScene(sceneData) {
     sceneGroup.add(s);
   }
 
-  // 5. Auto-fit orbit target to scene centre
+  // 5. Kick off background per-frame PLY pre-loading (non-blocking)
+  if (framePlyCount > 0) {
+    loadAllFramePLYs(currentShotName, framePlyCount);  // intentionally not awaited
+  }
+
+  // 6. Auto-fit orbit target to scene centre
   if (registeredFrames.length > 0) {
     let cx = 0, cy = 0, cz = 0;
     for (const f of registeredFrames) {
@@ -419,7 +440,8 @@ async function loadPLY(plyUrl) {
       vertexColors: hasColors,
       color: hasColors ? 0xffffff : 0x88aacc,
     });
-    sceneGroup.add(new THREE.Points(geometry, mat));
+    globalPointCloud = new THREE.Points(geometry, mat);
+    sceneGroup.add(globalPointCloud);
     showLoading("Point cloud loaded", 80);
 
   } catch (err) {
@@ -429,6 +451,73 @@ async function loadPLY(plyUrl) {
       statusMsg.textContent = "Point cloud load failed — continuing without PLY";
       showLoading("Point cloud unavailable (check console)", 80);
     }
+  }
+}
+
+// ── Per-frame PLY background loader ──────────────────────────────────────────
+// Loads per-frame PLYs one-by-one in background after scene is visible.
+// On first success: hides global PLY and switches to per-frame swap mode.
+
+async function loadAllFramePLYs(shotName, totalFramePLYs) {
+  framePoints = new Array(totalFrames).fill(null);
+  const loader = new THREE.PLYLoader();
+  let loaded = 0;
+
+  for (let i = 0; i < frameData.length; i++) {
+    const fd = frameData[i];
+    if (!fd || !fd.registered) continue;
+
+    const frameIdx = fd.frame_index;
+    try {
+      const resp = await fetch(`/api/frame_ply/${encodeURIComponent(shotName)}/${frameIdx}`);
+      if (!resp.ok) continue;
+
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let loadedBytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loadedBytes += value.length;
+      }
+
+      // If the user loaded a different shot while we were fetching, abort
+      if (currentShotName !== shotName) return;
+
+      const buffer = new Uint8Array(loadedBytes);
+      let offset = 0;
+      for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
+
+      const geometry = loader.parse(buffer.buffer);
+      const hasColors = geometry.hasAttribute("color");
+      const mat = new THREE.PointsMaterial({
+        size: 0.03,
+        vertexColors: hasColors,
+        color: hasColors ? 0xffffff : 0x88aacc,
+      });
+      const pts = new THREE.Points(geometry, mat);
+      pts.visible = false;
+      sceneGroup.add(pts);
+      framePoints[i] = pts;
+
+      loaded++;
+
+      // First cloud loaded: switch from global to per-frame mode
+      if (!frameCloudMode) {
+        frameCloudMode = true;
+        if (globalPointCloud) globalPointCloud.visible = false;
+        setFrame(currentFrame);
+      }
+
+      statusMsg.textContent = `Loading frame clouds… ${loaded} / ${totalFramePLYs}`;
+    } catch (e) {
+      console.warn(`Frame PLY ${frameIdx} failed:`, e);
+    }
+  }
+
+  if (currentShotName === shotName) {
+    statusMsg.textContent = `Loaded: ${shotName} — ${loaded} frame clouds`;
   }
 }
 
@@ -551,23 +640,45 @@ function setFrame(idx) {
     document.getElementById("ip-reg2").textContent  = fd.registered ? "YES" : "—";
   }
 
+  // Per-frame point cloud swap (when frame clouds have been loaded)
+  if (frameCloudMode) {
+    if (activeFrameCloud) activeFrameCloud.visible = false;
+    let cloud = framePoints[idx];
+    if (!cloud) {
+      // Find nearest loaded frame cloud
+      let bestDist = Infinity;
+      for (let i = 0; i < framePoints.length; i++) {
+        if (framePoints[i] && Math.abs(i - idx) < bestDist) {
+          bestDist = Math.abs(i - idx);
+          cloud = framePoints[i];
+        }
+      }
+    }
+    if (cloud) {
+      cloud.visible = true;
+      activeFrameCloud = cloud;
+    }
+  }
+
   // Follow-camera: snap Three.js camera to COLMAP pose for this frame.
   // COLMAP world → Three.js world: flip Y and Z (OpenCV→OpenGL convention).
   // rotation_matrix (R^T) rows are camera basis vectors in COLMAP world space:
   //   R^T[0] = right,  R^T[1] = down,  R^T[2] = forward (into scene)
+  // We update controls.target (not disable controls) so OrbitControls keeps working.
   if (followCam && fd && fd.registered && fd.position && fd.rotation_matrix) {
     const pos  = fd.position;
     const rotT = fd.rotation_matrix;
+    // Camera position in Three.js world (Y/Z flipped)
     camera.position.set(pos[0], -pos[1], -pos[2]);
-    // Up in Three.js = -R^T[1] (COLMAP Y is down), with Y/Z flip applied
+    // Up = -R^T[1] (COLMAP Y is down, Three.js Y is up)
     camera.up.set(-rotT[1][0], rotT[1][1], rotT[1][2]);
-    // Look-at = camera pos + forward direction (R^T[2]), Y/Z flipped
-    camera.lookAt(
+    // Orbit target = camera pos + forward direction (R^T[2]), Y/Z flipped
+    controls.target.set(
       pos[0] + rotT[2][0],
       -pos[1] - rotT[2][1],
       -pos[2] - rotT[2][2]
     );
-    controls.enabled = false;
+    controls.update();
   }
 }
 
@@ -671,17 +782,13 @@ playBtn.addEventListener("click", togglePlay);
 resetBtn.addEventListener("click", () => {
   followCam = false;
   followBtn.classList.remove("active");
-  controls.enabled = true;
   controls.reset();
 });
 
 followBtn.addEventListener("click", () => {
   followCam = !followCam;
   followBtn.classList.toggle("active", followCam);
-  if (!followCam) {
-    controls.enabled = true;
-    controls.update();
-  } else {
+  if (followCam) {
     setFrame(currentFrame);  // immediately snap to current frame's pose
   }
 });
