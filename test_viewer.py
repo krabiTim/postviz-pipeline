@@ -70,8 +70,12 @@ check("viewer: null rotation_matrix guard",
       "!frame.rotation_matrix" in html)
 check("viewer: Array.isArray rotT guard",
       "Array.isArray(rotT)" in html)
+check("viewer: PLY uses fetch not XHR loader.load",
+      "await fetch(plyUrl)" in html and "loader.parse(" in html)
 check("viewer: PLY error uses console.error",
       'console.error("PLY load error' in html)
+check("viewer: PLY timeout safety net",
+      "timedOut" in html and "15000" in html)
 check("viewer: focal_length_x fallback",
       "intr.focal_length_x" in html)
 check("viewer: hideLoading after try/catch",

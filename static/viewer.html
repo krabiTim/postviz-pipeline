@@ -353,43 +353,73 @@ async function buildScene(sceneData) {
 }
 
 // ── PLY loader ────────────────────────────────────────────────────────────────
+// Uses fetch() + PLYLoader.parse() instead of PLYLoader.load() (XHR-based).
+// XHR can stall on binary responses over localhost and never fire any callback,
+// leaving the loading Promise unresolved forever. fetch() gives us proper
+// async/await with stream progress and a clean error path.
 
-function loadPLY(plyUrl) {
-  return new Promise((resolve) => {
-    showLoading("Loading point cloud… 0%", 10);
-    const loader = new THREE.PLYLoader();
-    loader.load(
-      plyUrl,
-      (geometry) => {
-        geometry.computeBoundingBox();
-        const hasColors = geometry.hasAttribute("color");
-        const mat = new THREE.PointsMaterial({
-          size: 0.025,
-          vertexColors: hasColors,
-          color: hasColors ? 0xffffff : 0x88aacc,
-        });
-        const points = new THREE.Points(geometry, mat);
-        sceneGroup.add(points);
-        showLoading("Point cloud loaded", 80);
-        resolve();
-      },
-      (xhr) => {
-        // Map 0–100% of PLY download to bar range 10–78%
-        const dlPct = xhr.total ? xhr.loaded / xhr.total : 0;
-        const barPct = 10 + Math.round(dlPct * 68);
-        const label = xhr.total
-          ? `Loading point cloud… ${Math.round(dlPct * 100)}%`
-          : "Loading point cloud…";
-        showLoading(label, barPct);
-      },
-      (err) => {
-        console.error("PLY load error:", err);
-        statusMsg.textContent = "Point cloud load failed — continuing without PLY";
-        showLoading("Point cloud unavailable (check console)", 80);
-        resolve();
+async function loadPLY(plyUrl) {
+  showLoading("Loading point cloud… 0%", 10);
+
+  // Safety timeout: if PLY load takes > 15s, continue without it
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    console.warn("PLY load timed out — continuing without point cloud");
+    statusMsg.textContent = "Point cloud timed out — scene loaded without PLY";
+    showLoading("Point cloud timed out", 80);
+  }, 15000);
+
+  try {
+    const resp = await fetch(plyUrl);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    // Stream body with progress
+    const contentLength = parseInt(resp.headers.get("content-length") || "0");
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      if (contentLength) {
+        const pct = 10 + Math.round((loaded / contentLength) * 68);
+        showLoading(`Loading point cloud… ${Math.round(loaded / contentLength * 100)}%`, pct);
       }
-    );
-  });
+    }
+
+    if (timedOut) return;
+    clearTimeout(timeout);
+
+    // Combine chunks into one ArrayBuffer
+    const buffer = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
+
+    // Parse and add to scene
+    const loader = new THREE.PLYLoader();
+    const geometry = loader.parse(buffer.buffer);
+    geometry.computeBoundingBox();
+    const hasColors = geometry.hasAttribute("color");
+    const mat = new THREE.PointsMaterial({
+      size: 0.025,
+      vertexColors: hasColors,
+      color: hasColors ? 0xffffff : 0x88aacc,
+    });
+    sceneGroup.add(new THREE.Points(geometry, mat));
+    showLoading("Point cloud loaded", 80);
+
+  } catch (err) {
+    clearTimeout(timeout);
+    if (!timedOut) {
+      console.error("PLY load error:", err);
+      statusMsg.textContent = "Point cloud load failed — continuing without PLY";
+      showLoading("Point cloud unavailable (check console)", 80);
+    }
+  }
 }
 
 // ── Camera path spline ────────────────────────────────────────────────────────
