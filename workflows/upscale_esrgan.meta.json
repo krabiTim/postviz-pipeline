@@ -1,0 +1,14 @@
+{
+  "name": "ESRGAN Upscale",
+  "stage": "upscale",
+  "description": "4x ESRGAN upscaling for final delivery frames.",
+  "required_models": [
+    "4x-UltraSharp.pth"
+  ],
+  "inputs": [
+    "frame"
+  ],
+  "outputs": [
+    "image"
+  ]
+}

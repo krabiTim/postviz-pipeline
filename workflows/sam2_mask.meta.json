@@ -1,0 +1,15 @@
+{
+  "name": "SAM2 Mask",
+  "stage": "mask",
+  "description": "Segment foreground subject using GroundingDINO + SAM2. Propagates mask across all frames.",
+  "required_models": [
+    "sam2_1_hiera_tiny.pt",
+    "GroundingDINO_SwinT_OGC.pth"
+  ],
+  "inputs": [
+    "frame"
+  ],
+  "outputs": [
+    "mask"
+  ]
+}

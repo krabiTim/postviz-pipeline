@@ -1,0 +1,187 @@
+"""
+Viewer API Routes — FastAPI router serving the Three.js viewer and scene data.
+
+Previously in viewer_server.py as a standalone FastAPI app.
+Now registered as a router on the main FastAPI app in main.py.
+
+Endpoints:
+  GET /viewer                        → viewer.html
+  GET /api/shots                     → list of solved shot names
+  GET /api/scene/{shot_name}         → scene JSON (camera_path + intrinsics + PLY info)
+  GET /api/ply/{shot_name}           → binary PLY (global sparse cloud)
+  GET /api/frame_ply/{shot}/{frame}  → per-frame sparse PLY
+  GET /api/shots/{shot_name}/manifest → shot.json manifest
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
+from shot_manifest import load_manifest
+
+PROJECTS_DIR = Path.home() / "postviz-pipeline" / "projects"
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
+router = APIRouter()
+
+
+# ── PLY discovery ─────────────────────────────────────────────────────────────
+
+def find_ply(shot_name: str) -> Path | None:
+    """Find any .ply under sparse/0/, prefer fused.ply, fallback to any."""
+    sparse_dir = PROJECTS_DIR / shot_name / "colmap" / "sparse" / "0"
+    if not sparse_dir.exists():
+        return None
+    for name in ["fused.ply", "points3D.ply", "sparse.ply"]:
+        p = sparse_dir / name
+        if p.exists():
+            return p
+    plys = list(sparse_dir.glob("*.ply"))
+    return plys[0] if plys else None
+
+
+# ── Viewer HTML ───────────────────────────────────────────────────────────────
+
+@router.get("/viewer", response_class=HTMLResponse)
+async def get_viewer() -> HTMLResponse:
+    html_path = STATIC_DIR / "viewer.html"
+    if not html_path.exists():
+        return HTMLResponse(
+            "<html><body style='background:#111;color:#aaa;font-family:monospace;"
+            "padding:2rem'><h2>viewer.html not found</h2>"
+            "<p>Expected at static/viewer.html</p></body></html>"
+        )
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+# ── Shot listing ──────────────────────────────────────────────────────────────
+
+@router.get("/api/shots")
+async def list_shots() -> JSONResponse:
+    if not PROJECTS_DIR.exists():
+        return JSONResponse({"shots": []})
+    shots = sorted(
+        [
+            d.name for d in PROJECTS_DIR.iterdir()
+            if d.is_dir() and (d / "camera_path.json").exists()
+        ],
+        reverse=True,
+    )
+    return JSONResponse({"shots": shots})
+
+
+# ── Scene data ────────────────────────────────────────────────────────────────
+
+@router.get("/api/scene/{shot_name}")
+async def get_scene(shot_name: str) -> JSONResponse:
+    shot_dir = PROJECTS_DIR / shot_name
+    cp_path = shot_dir / "camera_path.json"
+    intr_path = shot_dir / "intrinsics.json"
+
+    if not cp_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"camera_path.json not found for '{shot_name}'. Run camera solve first."
+        )
+    if not intr_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"intrinsics.json not found for '{shot_name}'. Run camera solve first."
+        )
+
+    camera_path = json.loads(cp_path.read_text())
+    intrinsics = json.loads(intr_path.read_text())
+    ply_path = find_ply(shot_name)
+
+    frames_ply_dir = shot_dir / "frames_ply"
+    frame_ply_count = (
+        len(list(frames_ply_dir.glob("frame_*.ply")))
+        if frames_ply_dir.exists() else 0
+    )
+
+    return JSONResponse({
+        "shot_name": shot_name,
+        "camera_path": camera_path["frames"],
+        "intrinsics": intrinsics,
+        "ply_url": f"/api/ply/{shot_name}" if ply_path else None,
+        "frame_ply_count": frame_ply_count,
+        "total_frames": camera_path["total_frames"],
+        "fps": camera_path.get("fps", 24.0),
+        "solve_error": camera_path.get("solve_error"),
+        "source": camera_path.get("source", "colmap"),
+        "total_registered": sum(
+            1 for f in camera_path["frames"] if f.get("registered")
+        ),
+    })
+
+
+# ── PLY files ─────────────────────────────────────────────────────────────────
+
+@router.get("/api/ply/{shot_name}")
+async def get_ply(shot_name: str) -> FileResponse:
+    ply_path = find_ply(shot_name)
+    if ply_path is None:
+        raise HTTPException(status_code=404, detail=f"No PLY found for '{shot_name}'")
+    return FileResponse(
+        str(ply_path),
+        media_type="application/octet-stream",
+        filename=ply_path.name,
+    )
+
+
+@router.get("/api/frame_ply/{shot_name}/{frame_idx}")
+async def get_frame_ply(shot_name: str, frame_idx: int) -> FileResponse:
+    ply_path = (
+        PROJECTS_DIR / shot_name / "frames_ply" / f"frame_{frame_idx:06d}.ply"
+    )
+    if not ply_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No per-frame PLY for '{shot_name}' frame {frame_idx}"
+        )
+    return FileResponse(
+        str(ply_path),
+        media_type="application/octet-stream",
+        filename=ply_path.name,
+    )
+
+
+# ── Shot manifest ─────────────────────────────────────────────────────────────
+
+@router.get("/api/shots/{shot_name}/manifest")
+async def get_manifest(shot_name: str) -> JSONResponse:
+    shot_dir = PROJECTS_DIR / shot_name
+    if not shot_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Shot '{shot_name}' not found")
+    manifest = load_manifest(shot_dir)
+    if manifest is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No manifest (shot.json) for '{shot_name}'"
+        )
+    return JSONResponse(manifest)
+
+
+# ── Workflow listing ──────────────────────────────────────────────────────────
+
+@router.get("/api/workflows")
+async def list_workflows(stage: str | None = None) -> JSONResponse:
+    from workflow_registry import get_workflows
+    workflows = get_workflows(stage=stage)
+    return JSONResponse({
+        "workflows": [
+            {
+                "id": w.id,
+                "name": w.name,
+                "stage": w.stage,
+                "description": w.description,
+                "required_models": w.required_models,
+                "has_json": w.has_json,
+            }
+            for w in workflows
+        ]
+    })

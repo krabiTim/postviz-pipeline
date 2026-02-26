@@ -1,0 +1,16 @@
+{
+  "name": "FLUX Fill Inpaint",
+  "stage": "background",
+  "description": "FLUX.1 Fill model for high-quality background inpainting behind the masked foreground.",
+  "required_models": [
+    "flux1-fill-dev.safetensors"
+  ],
+  "inputs": [
+    "frame",
+    "mask",
+    "prompt"
+  ],
+  "outputs": [
+    "image"
+  ]
+}

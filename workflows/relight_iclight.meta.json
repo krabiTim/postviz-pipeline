@@ -1,0 +1,16 @@
+{
+  "name": "IC-Light Relight",
+  "stage": "relight",
+  "description": "IC-Light foreground-conditioned relighting to match the foreground to the new background.",
+  "required_models": [
+    "iclight_sd15_fc.safetensors"
+  ],
+  "inputs": [
+    "frame",
+    "mask",
+    "bg"
+  ],
+  "outputs": [
+    "image"
+  ]
+}

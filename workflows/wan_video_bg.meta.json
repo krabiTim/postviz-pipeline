@@ -1,0 +1,16 @@
+{
+  "name": "Wan 2.2 Video Background",
+  "stage": "video_bg",
+  "description": "Generate an animated background video using Wan 2.2. Output is a video clip matching the shot length.",
+  "required_models": [
+    "wan2.2_t2v_14B_bf16.safetensors"
+  ],
+  "inputs": [
+    "prompt",
+    "frame_count",
+    "fps"
+  ],
+  "outputs": [
+    "video"
+  ]
+}

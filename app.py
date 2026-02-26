@@ -1,3 +1,15 @@
+"""
+PostViz Pipeline — Gradio UI Definition
+
+This module defines build_ui() which returns a gr.Blocks instance.
+It is imported by main.py and mounted onto the FastAPI app via gr.mount_gradio_app().
+
+Do NOT call app.launch() here — main.py owns the uvicorn process.
+
+When run directly (python app.py) it falls back to standalone mode
+and starts the viewer server thread for local development.
+"""
+
 import gradio as gr
 import json
 import queue
@@ -12,13 +24,18 @@ from comfyui_api import (
     run_sam2_mask, generate_backgrounds,
     apply_relight, composite_frame, get_available_checkpoints
 )
-from viewer_server import start_viewer_server_thread
+from workflow_registry import get_workflows
+from shot_manifest import create_manifest, update_stage, update_meta, pipeline_log
+from camera_import import import_camera, SUPPORTED_EXTENSIONS
 
 COMFYUI_URL = "http://localhost:8188"
 PROJECTS_DIR = Path(__file__).parent / "projects"
 DELIVERY_DIR = Path(__file__).parent / "delivery"
 PROJECTS_DIR.mkdir(exist_ok=True)
 DELIVERY_DIR.mkdir(exist_ok=True)
+
+# Unified server — viewer lives on same port as Gradio
+VIEWER_PORT = 7860
 
 STYLE_SUFFIXES = {
     "Natural light":  ", natural daylight, soft shadows, photorealistic",
@@ -30,8 +47,18 @@ STYLE_SUFFIXES = {
 }
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _workflow_choices(stage: str) -> list:
+    """Return [(display_name, workflow_id), ...] for a given stage."""
+    workflows = get_workflows(stage=stage)
+    if not workflows:
+        return [("(no workflows installed)", "__none__")]
+    return [(w.name, w.id) for w in workflows]
+
+
 def get_viewer_html(shot_name: str) -> str:
-    url = f"http://localhost:7861/viewer?shot={shot_name}"
+    url = f"http://localhost:{VIEWER_PORT}/viewer?shot={shot_name}"
     return (
         f'<div style="font-family:monospace;padding:10px 0">'
         f'<a href="{url}" target="_blank" '
@@ -50,7 +77,7 @@ def check_comfyui() -> tuple[bool, str]:
         v = r.json()["system"]["comfyui_version"]
         return True, f"ComfyUI {v} running at {COMFYUI_URL}"
     except Exception:
-        return False, f"⚠ ComfyUI not detected at {COMFYUI_URL} — run ~/launch-postviz.sh first"
+        return False, f"ComfyUI not detected at {COMFYUI_URL} — run ~/launch-postviz.sh first"
 
 
 def make_shot_dir(video_path: str) -> Path:
@@ -65,7 +92,7 @@ def make_shot_dir(video_path: str) -> Path:
     return shot
 
 
-# ─── TAB 1: TRACK ────────────────────────────────────────────────────────────
+# ─── TAB 1: TRACK ─────────────────────────────────────────────────────────────
 
 def do_extract(video_file, state):
     if video_file is None:
@@ -83,6 +110,18 @@ def do_extract(video_file, state):
     state["frames_dir"] = str(frames_dir)
     state["fps"] = info["fps"]
 
+    # Write shot manifest
+    create_manifest(
+        shot,
+        video_source=Path(video_file).name,
+        fps=info["fps"],
+        frame_count=info["frame_count"],
+        width=info["width"],
+        height=info["height"],
+    )
+    update_stage(shot, "frames", done=True)
+    pipeline_log(shot, "frames", f"Extracted {info['frame_count']} frames at {info['fps']:.3f} fps")
+
     frame_files = sorted(frames_dir.glob("frame_*.png"))
     first = str(frame_files[0]) if frame_files else None
 
@@ -94,6 +133,51 @@ def do_extract(video_file, state):
         gr.update(value=first, visible=True),
         gr.update(visible=True),
     )
+
+
+def do_import_camera(camera_file, fps_override, state):
+    """Import camera path from FBX / USD / camera_path.json."""
+    if camera_file is None:
+        return "No camera file uploaded.", state, gr.update(visible=False)
+
+    if not state.get("shot_dir"):
+        # No shot dir yet — create one from the camera filename
+        shot = make_shot_dir(camera_file)
+        state["shot_dir"] = str(shot)
+        create_manifest(shot, video_source="", fps=float(fps_override) if fps_override else 24.0)
+
+    shot = Path(state["shot_dir"])
+    fps = float(fps_override) if fps_override else state.get("fps", 24.0)
+
+    try:
+        result = import_camera(camera_file, fps=fps)
+    except Exception as e:
+        return f"Camera import failed: {e}", state, gr.update(visible=False)
+
+    # Write camera_path.json and intrinsics.json
+    cp_path = shot / "camera_path.json"
+    cp_path.write_text(json.dumps(result, indent=2))
+
+    intrinsics = {
+        "focal_length_px": result.get("focal_length_px", 0),
+        "sensor_width_px": result.get("width", 0),
+        "sensor_height_px": result.get("height", 0),
+        "cx": result.get("cx", 0),
+        "cy": result.get("cy", 0),
+    }
+    (shot / "intrinsics.json").write_text(json.dumps(intrinsics, indent=2))
+
+    source = result.get("source", "unknown")
+    n_frames = result.get("total_frames", 0)
+    state["camera_poses_path"] = str(cp_path)
+    state["colmap_result"] = {"success": True, "solve_error": 0.0}
+
+    update_stage(shot, "camera", done=True, source=source, solve_error=0.0)
+    pipeline_log(shot, "camera", f"Imported {n_frames} frames from {source} file")
+
+    viewer_html = get_viewer_html(shot.name)
+    msg = f"Imported {n_frames} frames from {Path(camera_file).name} (source: {source})"
+    return msg, state, gr.update(value=viewer_html, visible=True)
 
 
 def do_colmap_solve(state, progress=gr.Progress()):
@@ -116,17 +200,16 @@ def do_colmap_solve(state, progress=gr.Progress()):
     t = threading.Thread(target=run, daemon=True)
     t.start()
 
-    # Map --- Step name --- log markers to progress fractions
     STEP_PROGRESS = {
-        "Feature extraction": (0.05, "Extracting SIFT features…"),
-        "Feature matching":   (0.30, "Matching features…"),
-        "Sparse mapping":     (0.55, "Sparse mapping (this takes a while)…"),
-        "PLY export":         (0.88, "Exporting point cloud…"),
-        "TXT export":         (0.92, "Exporting camera data…"),
+        "Feature extraction": (0.05, "Extracting SIFT features..."),
+        "Feature matching":   (0.30, "Matching features..."),
+        "Sparse mapping":     (0.55, "Sparse mapping (this takes a while)..."),
+        "PLY export":         (0.88, "Exporting point cloud..."),
+        "TXT export":         (0.92, "Exporting camera data..."),
     }
-    step_label = "Starting COLMAP…"
+    step_label = "Starting COLMAP..."
     last_yield = 0.0
-    progress(0, desc="Starting COLMAP…")
+    progress(0, desc="Starting COLMAP...")
 
     while True:
         try:
@@ -135,7 +218,6 @@ def do_colmap_solve(state, progress=gr.Progress()):
                 break
             log_lines.append(line.rstrip())
 
-            # Detect step transitions from --- markers
             stripped = line.strip()
             if stripped.startswith("---") and stripped.endswith("---"):
                 for key, (pct, label) in STEP_PROGRESS.items():
@@ -144,7 +226,6 @@ def do_colmap_solve(state, progress=gr.Progress()):
                         progress(pct, desc=label)
                         break
 
-            # Stream log to UI ~5× per second
             now = time.time()
             if now - last_yield > 0.2:
                 last_yield = now
@@ -152,7 +233,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
                     "\n".join(log_lines[-200:]),
                     state,
                     gr.update(value=""),
-                    gr.update(value=f"⏳ {step_label}"),
+                    gr.update(value=f"  {step_label}"),
                     gr.update(visible=False),
                 )
         except queue.Empty:
@@ -164,11 +245,12 @@ def do_colmap_solve(state, progress=gr.Progress()):
     state["colmap_result"] = result
 
     if not result.get("success"):
+        pipeline_log(shot, "camera", "COLMAP solve FAILED")
         yield (
             "\n".join(log_lines[-200:]),
             state,
             gr.update(value=""),
-            gr.update(value="❌ **SOLVE FAILED** — check log"),
+            gr.update(value="SOLVE FAILED — check log"),
             gr.update(visible=False),
         )
         return
@@ -178,13 +260,13 @@ def do_colmap_solve(state, progress=gr.Progress()):
     state["camera_poses_path"] = result.get("camera_poses_path")
 
     if err < 1.0:
-        quality = f"🟢 Solve error: {err:.3f}px (GOOD)"
+        quality = f"Solve error: {err:.3f}px (GOOD)"
     elif err < 2.0:
-        quality = f"🟡 Solve error: {err:.3f}px (ACCEPTABLE)"
+        quality = f"Solve error: {err:.3f}px (ACCEPTABLE)"
     else:
-        quality = f"🔴 Solve error: {err:.3f}px (POOR)"
+        quality = f"Solve error: {err:.3f}px (POOR)"
 
-    # Patch fps into camera_path.json (colmap_runner writes 0.0 as placeholder)
+    # Patch fps into camera_path.json
     fps = state.get("fps", 0.0)
     cp_path = shot / "camera_path.json"
     if cp_path.exists() and fps > 0:
@@ -202,6 +284,9 @@ def do_colmap_solve(state, progress=gr.Progress()):
     except Exception as e:
         log_lines.append(f"Per-frame PLY export skipped: {e}")
 
+    update_stage(shot, "camera", done=True, source="colmap", solve_error=err)
+    pipeline_log(shot, "camera", f"COLMAP solve OK — error {err:.3f}px")
+
     yield (
         "\n".join(log_lines[-200:]),
         state,
@@ -214,7 +299,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
 def do_accept_solve(state):
     if not state.get("colmap_result", {}).get("success"):
         return state, "No accepted solve yet."
-    return state, "Solve accepted. Go to 02 · MASK tab."
+    return state, "Solve accepted. Go to 02 MASK tab."
 
 
 def do_export_comfyui(state):
@@ -240,25 +325,24 @@ def do_export_comfyui(state):
     reg = manifest["registered_frames"]
     tot = manifest["total_frames"]
     err = manifest.get("solve_error")
-    err_str = f"{err:.3f} px" if err is not None else "—"
+    err_str = f"{err:.3f} px" if err is not None else "-"
 
     return (
         f"<div style='font-family:monospace;font-size:12px;color:#ccc;padding:8px'>"
-        f"<p style='color:#8f8;font-size:13px'>✓ ComfyUI Export Ready</p>"
+        f"<p style='color:#8f8;font-size:13px'>ComfyUI Export Ready</p>"
         f"<p><b>Written to:</b> <code>{export_dir}</code></p>"
         f"<p>Registered {reg}/{tot} frames &nbsp;|&nbsp; Solve error: {err_str}</p>"
         f"<hr style='border-color:#333;margin:8px 0'>"
         f"<p><b>In ComfyUI:</b></p>"
         f"<ul style='margin:4px 0 4px 16px'>"
-        f"<li>Load <code>camera_poses.json</code> → KJNodes &gt; Load Camera Path JSON</li>"
-        f"<li>PLY path → <code>sparse_ply_path.txt</code></li>"
-        f"<li>All positions in COLMAP world space</li>"
+        f"<li>Load <code>camera_poses.json</code> via KJNodes &gt; Load Camera Path JSON</li>"
+        f"<li>PLY path via <code>sparse_ply_path.txt</code></li>"
         f"</ul>"
         f"</div>"
     )
 
 
-# ─── TAB 2: MASK ─────────────────────────────────────────────────────────────
+# ─── TAB 2: MASK ──────────────────────────────────────────────────────────────
 
 def load_frame(frame_idx, state):
     frames_dir = state.get("frames_dir")
@@ -278,7 +362,7 @@ def get_frame_count(state):
     return max(0, len(list(Path(frames_dir).glob("frame_*.png"))) - 1)
 
 
-def do_run_mask(state, progress=gr.Progress()):
+def do_run_mask(workflow_id, state, progress=gr.Progress()):
     if not state.get("frames_dir"):
         return "Run camera solve first.", state, gr.update(), gr.update()
 
@@ -299,14 +383,17 @@ def do_run_mask(state, progress=gr.Progress()):
     coverage = result.get("coverage_pct", 0.0)
 
     if coverage < 5.0:
-        quality = f"⚠ Coverage {coverage:.1f}% — too low (wrong subject?)"
+        quality = f"Coverage {coverage:.1f}% — too low (wrong subject?)"
     elif coverage > 95.0:
-        quality = f"⚠ Coverage {coverage:.1f}% — too high (too much masked?)"
+        quality = f"Coverage {coverage:.1f}% — too high (too much masked?)"
     else:
-        quality = f"✓ Coverage {coverage:.1f}%"
+        quality = f"Coverage {coverage:.1f}%"
 
     mask_files = result.get("mask_frames", [])
     preview = mask_files[0] if mask_files else None
+
+    update_stage(shot, "mask", done=True, workflow=workflow_id)
+    pipeline_log(shot, "mask", f"Mask propagated via {workflow_id} — coverage {coverage:.1f}%")
 
     return (
         quality,
@@ -319,12 +406,12 @@ def do_run_mask(state, progress=gr.Progress()):
 def do_accept_mask(state):
     if not state.get("masks_dir"):
         return state, "No mask accepted yet."
-    return state, "Mask accepted. Go to 03 · GENERATE tab."
+    return state, "Mask accepted. Go to 03 GENERATE tab."
 
 
-# ─── TAB 3: GENERATE + COMPOSITE ─────────────────────────────────────────────
+# ─── TAB 3: GENERATE + COMPOSITE ──────────────────────────────────────────────
 
-def do_generate(prompt, style, state, progress=gr.Progress()):
+def do_generate(workflow_id, prompt, style, state, progress=gr.Progress()):
     if not state.get("masks_dir"):
         return "Run masking first.", state, None, None, None
 
@@ -347,6 +434,9 @@ def do_generate(prompt, style, state, progress=gr.Progress()):
 
     state["bg_paths"] = bg_paths
     state["selected_bg"] = bg_paths[0] if bg_paths else None
+
+    update_stage(shot, "background", done=False, workflow=workflow_id)
+    pipeline_log(shot, "background", f"Generated 3 variants via {workflow_id}")
 
     imgs = bg_paths[:3] + [None] * (3 - len(bg_paths))
     return "Generated 3 variants. Click one to select.", state, imgs[0], imgs[1], imgs[2]
@@ -385,6 +475,9 @@ def do_composite(use_relight, denoise, state, progress=gr.Progress()):
         return f"Composite failed: {e}", state, gr.update()
 
     state["composite_path"] = out_path
+    update_stage(shot, "composite", done=True, relight=use_relight)
+    pipeline_log(shot, "composite", f"Composite rendered (relight={use_relight})")
+
     return "Composite complete.", state, gr.update(value=out_path, visible=True)
 
 
@@ -392,162 +485,225 @@ def do_save_delivery(state):
     comp = state.get("composite_path")
     if not comp or not Path(comp).exists():
         return "No composite to save."
+    shot = Path(state["shot_dir"])
     dest = DELIVERY_DIR / Path(comp).name
     dest.write_bytes(Path(comp).read_bytes())
+    update_stage(shot, "delivery", done=True, path=str(dest))
+    pipeline_log(shot, "delivery", f"Saved to {dest}")
     return f"Saved to {dest}"
 
 
 # ─── BUILD UI ─────────────────────────────────────────────────────────────────
 
-comfyui_ok, comfyui_msg = check_comfyui()
+def build_ui() -> gr.Blocks:
+    """Build and return the Gradio Blocks interface. Called by main.py."""
 
-with gr.Blocks(title="PostViz Pipeline") as app:
+    comfyui_ok, comfyui_msg = check_comfyui()
+    mask_choices = _workflow_choices("mask")
+    bg_choices = _workflow_choices("background")
+    cam_extensions = ", ".join(SUPPORTED_EXTENSIONS)
 
-    state = gr.State({})
+    with gr.Blocks(title="PostViz Pipeline") as demo:
 
-    # ComfyUI status banner
-    with gr.Row():
-        status_banner = gr.Markdown(
-            f"{'✓' if comfyui_ok else '⚠'} {comfyui_msg}"
-        )
+        state = gr.State({})
 
-    # ── Tab 1: TRACK ─────────────────────────────────────────────────────────
-    with gr.Tab("01 · TRACK"):
-        gr.Markdown("## Camera Solve")
-
+        # ComfyUI status banner
         with gr.Row():
-            with gr.Column(scale=1):
-                video_input = gr.File(
-                    label="Upload video (.mp4 .mov .mxf .avi)",
-                    file_types=[".mp4", ".mov", ".mxf", ".avi"]
-                )
-                extract_btn = gr.Button("Extract Frames", variant="primary")
-                extract_status = gr.Textbox(label="Status", interactive=False, lines=2)
-                frame_preview = gr.Image(label="First frame", visible=False)
-                solve_btn = gr.Button("Run Camera Solve", variant="primary", visible=False)
+            gr.Markdown(
+                f"{'OK' if comfyui_ok else 'WARN'} {comfyui_msg}"
+            )
 
-            with gr.Column(scale=1):
-                with gr.Accordion("COLMAP log", open=False):
-                    solve_log = gr.Textbox(
-                        label="",
-                        lines=12,
-                        interactive=False,
-                        max_lines=20,
-                        show_label=False,
+        # ── Tab 1: TRACK ──────────────────────────────────────────────────────
+        with gr.Tab("01 · TRACK"):
+            gr.Markdown("## Camera Solve / Import")
+
+            camera_source = gr.Radio(
+                choices=["COLMAP Solve", "Import Camera File"],
+                value="COLMAP Solve",
+                label="Camera source",
+            )
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    video_input = gr.File(
+                        label="Upload video (.mp4 .mov .mxf .avi)",
+                        file_types=[".mp4", ".mov", ".mxf", ".avi"]
                     )
-                solve_quality = gr.Markdown(value="", visible=True)
-                viewer_html = gr.HTML(value="")
-                accept_solve_btn = gr.Button("Accept Solve →", variant="secondary", visible=False)
-                accept_solve_status = gr.Textbox(label="", interactive=False, visible=True, lines=1)
-                export_btn = gr.Button("Export to ComfyUI", variant="secondary", visible=False)
-                export_status = gr.HTML(value="")
+                    extract_btn = gr.Button("Extract Frames", variant="primary")
+                    extract_status = gr.Textbox(label="Status", interactive=False, lines=2)
+                    frame_preview = gr.Image(label="First frame", visible=False)
 
-        extract_btn.click(
-            do_extract,
-            inputs=[video_input, state],
-            outputs=[extract_status, state, frame_preview, solve_btn]
-        )
-        solve_btn.click(
-            do_colmap_solve,
-            inputs=[state],
-            outputs=[solve_log, state, viewer_html, solve_quality, accept_solve_btn]
-        )
-        accept_solve_btn.click(
-            do_accept_solve,
-            inputs=[state],
-            outputs=[state, accept_solve_status]
-        )
-        # Show export button once solve is accepted
-        accept_solve_btn.click(
-            lambda s: gr.update(visible=s.get("colmap_result", {}).get("success", False)),
-            inputs=[state],
-            outputs=[export_btn]
-        )
-        export_btn.click(
-            do_export_comfyui,
-            inputs=[state],
-            outputs=[export_status]
-        )
+                    # COLMAP group
+                    with gr.Group(visible=True) as colmap_group:
+                        solve_btn = gr.Button("Run Camera Solve", variant="primary", visible=False)
 
-    # ── Tab 2: MASK ──────────────────────────────────────────────────────────
-    with gr.Tab("02 · MASK"):
-        gr.Markdown("## Foreground Masking\n_Uses SAM2 + GroundingDINO with 'person' prompt. Suitable for greenscreen/bluescreen subjects._")
+                    # Import camera file group
+                    with gr.Group(visible=False) as import_group:
+                        camera_file_input = gr.File(
+                            label=f"Camera file ({cam_extensions})",
+                            file_types=SUPPORTED_EXTENSIONS,
+                        )
+                        fps_input = gr.Number(label="FPS (leave 0 to use video fps)", value=0, precision=3)
+                        import_btn = gr.Button("Import Camera File", variant="primary")
+                        import_status = gr.Textbox(label="Import status", interactive=False, lines=2)
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                frame_slider = gr.Slider(0, 100, value=0, step=1, label="Frame scrubber")
-                frame_display = gr.Image(label="Frame viewer", interactive=False)
-                mask_btn = gr.Button("Propagate Mask", variant="primary")
-                mask_status = gr.Textbox(label="Mask quality", interactive=False, lines=2)
+                with gr.Column(scale=1):
+                    with gr.Accordion("COLMAP log", open=False):
+                        solve_log = gr.Textbox(
+                            label="",
+                            lines=12,
+                            interactive=False,
+                            max_lines=20,
+                            show_label=False,
+                        )
+                    solve_quality = gr.Markdown(value="", visible=True)
+                    viewer_html = gr.HTML(value="")
+                    accept_solve_btn = gr.Button("Accept Solve ->", variant="secondary", visible=False)
+                    accept_solve_status = gr.Textbox(label="", interactive=False, visible=True, lines=1)
+                    export_btn = gr.Button("Export to ComfyUI", variant="secondary", visible=False)
+                    export_status = gr.HTML(value="")
 
-            with gr.Column(scale=1):
-                mask_preview = gr.Image(label="Mask preview", visible=False)
-                accept_mask_btn = gr.Button("Accept Mask →", variant="secondary", visible=False)
-                accept_mask_status = gr.Textbox(label="", interactive=False, lines=1)
+            # Toggle COLMAP / Import groups based on camera_source radio
+            def _toggle_camera_source(choice):
+                colmap_vis = (choice == "COLMAP Solve")
+                return gr.update(visible=colmap_vis), gr.update(visible=not colmap_vis)
 
-        frame_slider.change(load_frame, inputs=[frame_slider, state], outputs=[frame_display])
-        mask_btn.click(
-            do_run_mask,
-            inputs=[state],
-            outputs=[mask_status, state, mask_preview, accept_mask_btn]
-        )
-        accept_mask_btn.click(
-            do_accept_mask,
-            inputs=[state],
-            outputs=[state, accept_mask_status]
-        )
+            camera_source.change(
+                _toggle_camera_source,
+                inputs=[camera_source],
+                outputs=[colmap_group, import_group],
+            )
 
-    # ── Tab 3: GENERATE + COMPOSITE ──────────────────────────────────────────
-    with gr.Tab("03 · GENERATE"):
-        gr.Markdown("## Background Generation + Composite")
+            extract_btn.click(
+                do_extract,
+                inputs=[video_input, state],
+                outputs=[extract_status, state, frame_preview, solve_btn]
+            )
+            solve_btn.click(
+                do_colmap_solve,
+                inputs=[state],
+                outputs=[solve_log, state, viewer_html, solve_quality, accept_solve_btn]
+            )
+            import_btn.click(
+                do_import_camera,
+                inputs=[camera_file_input, fps_input, state],
+                outputs=[import_status, state, viewer_html],
+            )
+            accept_solve_btn.click(
+                do_accept_solve,
+                inputs=[state],
+                outputs=[state, accept_solve_status]
+            )
+            accept_solve_btn.click(
+                lambda s: gr.update(visible=s.get("colmap_result", {}).get("success", False)),
+                inputs=[state],
+                outputs=[export_btn]
+            )
+            export_btn.click(
+                do_export_comfyui,
+                inputs=[state],
+                outputs=[export_status]
+            )
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                prompt_box = gr.Textbox(label="Background description", lines=3,
-                                        placeholder="e.g. vast stormy coastline with crashing waves...")
-                style_dropdown = gr.Dropdown(
-                    choices=list(STYLE_SUFFIXES.keys()),
-                    value="Natural light",
-                    label="Lighting style"
-                )
-                generate_btn = gr.Button("Generate Backgrounds (3 variants)", variant="primary")
-                generate_status = gr.Textbox(label="Status", interactive=False, lines=2)
+        # ── Tab 2: MASK ───────────────────────────────────────────────────────
+        with gr.Tab("02 · MASK"):
+            gr.Markdown("## Foreground Masking")
 
-                gr.Markdown("### Select variant")
-                with gr.Row():
-                    bg_img_0 = gr.Image(label="Variant 1", interactive=True, height=160)
-                    bg_img_1 = gr.Image(label="Variant 2", interactive=True, height=160)
-                    bg_img_2 = gr.Image(label="Variant 3", interactive=True, height=160)
-                selected_bg_label = gr.Textbox(label="Selected", interactive=False, lines=1)
+            mask_workflow_dropdown = gr.Dropdown(
+                choices=mask_choices,
+                value=mask_choices[0][1] if mask_choices else "__none__",
+                label="Masking workflow",
+            )
 
-            with gr.Column(scale=1):
-                use_relight = gr.Checkbox(label="Apply IC-Light relighting", value=False)
-                denoise_slider = gr.Slider(0.2, 0.8, value=0.45, step=0.05,
-                                           label="Relight denoise strength")
-                composite_btn = gr.Button("Composite", variant="primary")
-                composite_status = gr.Textbox(label="Status", interactive=False, lines=2)
-                composite_preview = gr.Image(label="Composite result", visible=False)
-                save_btn = gr.Button("Save to delivery folder")
-                save_status = gr.Textbox(label="", interactive=False, lines=1)
+            with gr.Row():
+                with gr.Column(scale=1):
+                    frame_slider = gr.Slider(0, 100, value=0, step=1, label="Frame scrubber")
+                    frame_display = gr.Image(label="Frame viewer", interactive=False)
+                    mask_btn = gr.Button("Propagate Mask", variant="primary")
+                    mask_status = gr.Textbox(label="Mask quality", interactive=False, lines=2)
 
-        generate_btn.click(
-            do_generate,
-            inputs=[prompt_box, style_dropdown, state],
-            outputs=[generate_status, state, bg_img_0, bg_img_1, bg_img_2]
-        )
-        bg_img_0.select(lambda s: select_bg(s, state), inputs=[bg_img_0], outputs=[state, selected_bg_label])
-        bg_img_1.select(lambda s: select_bg(s, state), inputs=[bg_img_1], outputs=[state, selected_bg_label])
-        bg_img_2.select(lambda s: select_bg(s, state), inputs=[bg_img_2], outputs=[state, selected_bg_label])
+                with gr.Column(scale=1):
+                    mask_preview = gr.Image(label="Mask preview", visible=False)
+                    accept_mask_btn = gr.Button("Accept Mask ->", variant="secondary", visible=False)
+                    accept_mask_status = gr.Textbox(label="", interactive=False, lines=1)
 
-        composite_btn.click(
-            do_composite,
-            inputs=[use_relight, denoise_slider, state],
-            outputs=[composite_status, state, composite_preview]
-        )
-        save_btn.click(do_save_delivery, inputs=[state], outputs=[save_status])
+            frame_slider.change(load_frame, inputs=[frame_slider, state], outputs=[frame_display])
+            mask_btn.click(
+                do_run_mask,
+                inputs=[mask_workflow_dropdown, state],
+                outputs=[mask_status, state, mask_preview, accept_mask_btn]
+            )
+            accept_mask_btn.click(
+                do_accept_mask,
+                inputs=[state],
+                outputs=[state, accept_mask_status]
+            )
 
+        # ── Tab 3: GENERATE + COMPOSITE ───────────────────────────────────────
+        with gr.Tab("03 · GENERATE"):
+            gr.Markdown("## Background Generation + Composite")
+
+            bg_workflow_dropdown = gr.Dropdown(
+                choices=bg_choices,
+                value=bg_choices[0][1] if bg_choices else "__none__",
+                label="Background workflow",
+            )
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    prompt_box = gr.Textbox(label="Background description", lines=3,
+                                            placeholder="e.g. vast stormy coastline with crashing waves...")
+                    style_dropdown = gr.Dropdown(
+                        choices=list(STYLE_SUFFIXES.keys()),
+                        value="Natural light",
+                        label="Lighting style"
+                    )
+                    generate_btn = gr.Button("Generate Backgrounds (3 variants)", variant="primary")
+                    generate_status = gr.Textbox(label="Status", interactive=False, lines=2)
+
+                    gr.Markdown("### Select variant")
+                    with gr.Row():
+                        bg_img_0 = gr.Image(label="Variant 1", interactive=True, height=160)
+                        bg_img_1 = gr.Image(label="Variant 2", interactive=True, height=160)
+                        bg_img_2 = gr.Image(label="Variant 3", interactive=True, height=160)
+                    selected_bg_label = gr.Textbox(label="Selected", interactive=False, lines=1)
+
+                with gr.Column(scale=1):
+                    use_relight = gr.Checkbox(label="Apply IC-Light relighting", value=False)
+                    denoise_slider = gr.Slider(0.2, 0.8, value=0.45, step=0.05,
+                                               label="Relight denoise strength")
+                    composite_btn = gr.Button("Composite", variant="primary")
+                    composite_status = gr.Textbox(label="Status", interactive=False, lines=2)
+                    composite_preview = gr.Image(label="Composite result", visible=False)
+                    save_btn = gr.Button("Save to delivery folder")
+                    save_status = gr.Textbox(label="", interactive=False, lines=1)
+
+            generate_btn.click(
+                do_generate,
+                inputs=[bg_workflow_dropdown, prompt_box, style_dropdown, state],
+                outputs=[generate_status, state, bg_img_0, bg_img_1, bg_img_2]
+            )
+            bg_img_0.select(lambda s: select_bg(s, state), inputs=[bg_img_0], outputs=[state, selected_bg_label])
+            bg_img_1.select(lambda s: select_bg(s, state), inputs=[bg_img_1], outputs=[state, selected_bg_label])
+            bg_img_2.select(lambda s: select_bg(s, state), inputs=[bg_img_2], outputs=[state, selected_bg_label])
+
+            composite_btn.click(
+                do_composite,
+                inputs=[use_relight, denoise_slider, state],
+                outputs=[composite_status, state, composite_preview]
+            )
+            save_btn.click(do_save_delivery, inputs=[state], outputs=[save_status])
+
+    return demo
+
+
+# ─── Standalone (dev) mode ────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Only import viewer thread when running standalone (not via main.py)
+    from viewer_server import start_viewer_server_thread
     start_viewer_server_thread()
-    app.queue()
-    app.launch(server_name="0.0.0.0", server_port=7860, share=False, theme=gr.themes.Base())
+
+    ui = build_ui()
+    ui.queue()
+    ui.launch(server_name="0.0.0.0", server_port=7860, share=False, theme=gr.themes.Base())

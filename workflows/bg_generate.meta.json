@@ -1,0 +1,16 @@
+{
+  "name": "SDXL Inpaint",
+  "stage": "background",
+  "description": "SDXL inpainting-based background generation. Legacy workflow.",
+  "required_models": [
+    "epicrealismXL_vxviiCrystalclear.safetensors"
+  ],
+  "inputs": [
+    "frame",
+    "mask",
+    "prompt"
+  ],
+  "outputs": [
+    "image"
+  ]
+}

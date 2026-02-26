@@ -1,0 +1,17 @@
+{
+  "name": "ControlNet Depth Background",
+  "stage": "background",
+  "description": "Depth-guided background generation using ControlNet. Uses COLMAP depth map for perspective-correct backgrounds.",
+  "required_models": [
+    "control_v11f1p_sd15_depth.pth"
+  ],
+  "inputs": [
+    "frame",
+    "mask",
+    "prompt",
+    "depth"
+  ],
+  "outputs": [
+    "image"
+  ]
+}

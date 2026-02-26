@@ -1,0 +1,27 @@
+# PostViz Pipeline — Python Dependencies
+# Install: pip install -r requirements.txt
+# (run from within the activated venv: source ~/comfyui-postviz/venv/bin/activate)
+
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9     # required by FastAPI for file uploads
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+gradio>=5.0.0
+
+# ── ComfyUI API client ────────────────────────────────────────────────────────
+requests>=2.31.0
+websocket-client>=1.7.0
+
+# ── Image / video processing ──────────────────────────────────────────────────
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# ── Point cloud preview ───────────────────────────────────────────────────────
+open3d>=0.18.0
+matplotlib>=3.8.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+# (no additional deps needed for camera_import — uses stdlib subprocess + json)
