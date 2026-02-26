@@ -275,9 +275,13 @@ async function loadShot(shotName) {
   updateFrameLabel(0);
 
   // Build scene geometry
-  await buildScene(sceneData);
-
-  hideLoading();
+  try {
+    await buildScene(sceneData);
+  } catch (e) {
+    console.error("buildScene error:", e);
+    statusMsg.textContent = "Scene build error: " + e.message;
+  }
+  hideLoading();  // always runs, even on error
   statusMsg.textContent = `Loaded: ${shotName}`;
   setFrame(0);
 }
@@ -379,9 +383,10 @@ function loadPLY(plyUrl) {
         showLoading(label, barPct);
       },
       (err) => {
-        console.warn("PLY load error:", err);
-        showLoading("Point cloud unavailable", 80);
-        resolve(); // non-fatal
+        console.error("PLY load error:", err);
+        statusMsg.textContent = "Point cloud load failed — continuing without PLY";
+        showLoading("Point cloud unavailable (check console)", 80);
+        resolve();
       }
     );
   });
@@ -417,8 +422,11 @@ function applyRotT(rotMat, v) {
 }
 
 function buildFrustumMesh(frame, intr, scale) {
+  // Guard: skip if position or rotation data is missing
+  if (!frame.position || !frame.rotation_matrix) return null;
+  const rotT = frame.rotation_matrix;
+  if (!Array.isArray(rotT) || rotT.length < 3 || !rotT[0]) return null;
   const pos  = frame.position;       // [x,y,z] world
-  const rotT = frame.rotation_matrix; // 3×3 R^T row-major
 
   // Frustum corners in camera space at depth=scale
   // Camera convention: +X right, +Y down, +Z forward (COLMAP/OpenCV)
@@ -521,7 +529,8 @@ function updateInfoPanel(sceneData) {
   document.getElementById("ip-frames").textContent  = tot;
   document.getElementById("ip-reg").textContent     = `${reg} / ${tot} (${pct}%)`;
   document.getElementById("ip-model").textContent   = intr.model || "—";
-  document.getElementById("ip-focal").textContent   = intr.focal_length ? `${intr.focal_length.toFixed(1)} px` : "—";
+  const fl = intr.focal_length || intr.focal_length_x;
+  document.getElementById("ip-focal").textContent   = fl ? `${fl.toFixed(1)} px` : "—";
   document.getElementById("ip-fov").textContent     = intr.fov_y_deg    ? `${intr.fov_y_deg.toFixed(1)}°`    : "—";
 
   const errEl = document.getElementById("ip-err");

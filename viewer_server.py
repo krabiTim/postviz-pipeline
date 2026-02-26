@@ -38,6 +38,21 @@ app_viewer.add_middleware(
 app_viewer.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# ── PLY discovery ────────────────────────────────────────────────────────────
+
+def find_ply(shot_name: str):
+    """Find any .ply file under sparse/0/, prefer fused.ply, fallback to any."""
+    sparse_dir = PROJECTS_DIR / shot_name / "colmap" / "sparse" / "0"
+    if not sparse_dir.exists():
+        return None
+    for name in ["fused.ply", "points3D.ply", "sparse.ply"]:
+        p = sparse_dir / name
+        if p.exists():
+            return p
+    plys = list(sparse_dir.glob("*.ply"))
+    return plys[0] if plys else None
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app_viewer.get("/viewer", response_class=HTMLResponse)
@@ -87,13 +102,13 @@ async def get_scene(shot_name: str):
     camera_path = json.loads(cp_path.read_text())
     intrinsics = json.loads(intr_path.read_text())
 
-    ply_path = shot_dir / "colmap" / "sparse" / "0" / "fused.ply"
+    ply_path = find_ply(shot_name)
 
     return JSONResponse({
         "shot_name": shot_name,
         "camera_path": camera_path["frames"],
         "intrinsics": intrinsics,
-        "ply_url": f"/api/ply/{shot_name}" if ply_path.exists() else None,
+        "ply_url": f"/api/ply/{shot_name}" if ply_path else None,
         "total_frames": camera_path["total_frames"],
         "fps": camera_path.get("fps", 24.0),
         "solve_error": camera_path.get("solve_error"),
@@ -105,18 +120,16 @@ async def get_scene(shot_name: str):
 
 @app_viewer.get("/api/ply/{shot_name}")
 async def get_ply(shot_name: str):
-    ply_path = (
-        PROJECTS_DIR / shot_name / "colmap" / "sparse" / "0" / "fused.ply"
-    )
-    if not ply_path.exists():
+    ply_path = find_ply(shot_name)
+    if ply_path is None:
         raise HTTPException(
             status_code=404,
-            detail=f"PLY not found for shot '{shot_name}'"
+            detail=f"No PLY found for shot '{shot_name}'"
         )
     return FileResponse(
         str(ply_path),
         media_type="application/octet-stream",
-        filename="fused.ply",
+        filename=ply_path.name,
     )
 
 

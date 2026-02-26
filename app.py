@@ -152,7 +152,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
                     "\n".join(log_lines[-200:]),
                     state,
                     gr.update(value=""),
-                    gr.update(value=f"⏳ {step_label}", visible=True),
+                    gr.update(value=f"⏳ {step_label}"),
                     gr.update(visible=False),
                 )
         except queue.Empty:
@@ -168,7 +168,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
             "\n".join(log_lines[-200:]),
             state,
             gr.update(value=""),
-            gr.update(value="❌ SOLVE FAILED", visible=True),
+            gr.update(value="❌ **SOLVE FAILED** — check log"),
             gr.update(visible=False),
         )
         return
@@ -199,7 +199,7 @@ def do_colmap_solve(state, progress=gr.Progress()):
         "\n".join(log_lines[-200:]),
         state,
         gr.update(value=get_viewer_html(shot.name)),
-        gr.update(value=quality, visible=True),
+        gr.update(value=quality),
         gr.update(visible=True),
     )
 
@@ -420,8 +420,15 @@ with gr.Blocks(title="PostViz Pipeline") as app:
                 solve_btn = gr.Button("Run Camera Solve", variant="primary", visible=False)
 
             with gr.Column(scale=1):
-                solve_log = gr.Textbox(label="COLMAP log", lines=10, interactive=False, max_lines=10)
-                solve_quality = gr.Textbox(label="Solve quality", interactive=False, visible=False)
+                with gr.Accordion("COLMAP log", open=False):
+                    solve_log = gr.Textbox(
+                        label="",
+                        lines=12,
+                        interactive=False,
+                        max_lines=20,
+                        show_label=False,
+                    )
+                solve_quality = gr.Markdown(value="", visible=True)
                 viewer_html = gr.HTML(value="")
                 accept_solve_btn = gr.Button("Accept Solve →", variant="secondary", visible=False)
                 accept_solve_status = gr.Textbox(label="", interactive=False, visible=True, lines=1)
