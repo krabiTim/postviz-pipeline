@@ -1,9 +1,7 @@
+projects/
+delivery/
 __pycache__/
 *.pyc
-*.pyo
-
-# Shot project data (frames, colmap outputs, generated images)
-projects/
-
-# Delivery outputs
-delivery/
+.env
+*.egg-info/
+.pytest_cache/
