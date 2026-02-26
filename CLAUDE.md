@@ -61,6 +61,7 @@ postviz-pipeline/
 ├── app.py                       ← Gradio blocks definition only (no launch call)
 ├── colmap_runner.py             ← COLMAP subprocess wrapper + frame extraction
 ├── comfyui_api.py               ← ComfyUI HTTP+WebSocket client
+├── comfyui_nodes.py             ← /object_info query, node search, workflow validation
 ├── workflow_registry.py         ← scans workflows/, returns WorkflowMeta list
 ├── shot_manifest.py             ← read/write shot.json per shot
 │
@@ -111,6 +112,12 @@ postviz-pipeline/
 │       ├── composites/          ← composited output frames
 │       ├── frames_ply/          ← per-frame sparse PLY files
 │       └── delivery/            ← final exported files
+│
+├── docs/
+│   └── COMFYUI_LLM_ONBOARDING.md  ← LLM onboarding prompt for workflow generation
+│
+├── .cache/                      ← auto-generated: ComfyUI node info cache
+│   └── object_info.json         ← cached /object_info response (auto-refreshed)
 │
 ├── delivery/                    ← global delivery output folder
 ├── install.sh                   ← team install script
@@ -175,6 +182,21 @@ controls.target.set(pos[0] + rotT[2][0], -pos[1] - rotT[2][1], -pos[2] - rotT[2]
 
 ## How To: Add a New ComfyUI Workflow
 
+**Step 0 — Discover real node names** (never guess):
+```bash
+# Fetch + cache all installed nodes from live ComfyUI
+python comfyui_nodes.py fetch
+
+# Search for nodes by keyword
+python comfyui_nodes.py search sam
+python comfyui_nodes.py search inpaint
+
+# Inspect a specific node's exact interface
+python comfyui_nodes.py inspect ExactNodeName
+```
+
+See `docs/COMFYUI_LLM_ONBOARDING.md` for the full methodology.
+
 1. Export the workflow from ComfyUI as JSON (Save → Export API format)
 2. Replace hardcoded values with template tokens:
    - `"__FRAME__"` — path to source frame (uploaded by comfyui_api.py)
@@ -193,7 +215,13 @@ controls.target.set(pos[0] + rotT[2][0], -pos[1] - rotT[2][1], -pos[2] - rotT[2]
      "outputs": ["image"]
    }
    ```
-5. Restart the app — the workflow appears in the dropdown immediately.
+5. **Validate against ComfyUI** before committing:
+   ```bash
+   python comfyui_nodes.py validate workflows/your_workflow.json
+   # Or validate all workflows at once:
+   python workflow_registry.py --validate
+   ```
+6. Restart the app — the workflow appears in the dropdown immediately.
 
 Valid `stage` values: `"mask"` | `"background"` | `"relight"` | `"upscale"` | `"video_bg"`
 

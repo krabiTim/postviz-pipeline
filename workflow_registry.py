@@ -2,14 +2,20 @@
 Workflow Registry — scans the workflows/ directory at startup and exposes
 WorkflowMeta objects so the UI can build dynamic dropdowns without hardcoded names.
 
+Includes validation via comfyui_nodes.py which queries ComfyUI's /object_info
+to verify that workflow JSON references only real, installed nodes.
+
 Usage:
-    from workflow_registry import get_workflows, load_workflow
+    from workflow_registry import get_workflows, load_workflow, validate_workflow
 
     # Populate a Gradio dropdown:
     choices = [(w.name, w.id) for w in get_workflows(stage="background")]
 
     # Load the ComfyUI JSON for a selected workflow:
     wf = load_workflow("bg_flux_inpaint")
+
+    # Validate a workflow against live ComfyUI:
+    errors = validate_workflow("bg_flux_inpaint")
 """
 
 from __future__ import annotations
@@ -99,6 +105,30 @@ def load_workflow(workflow_id: str) -> dict:
     return json.loads(meta.json_path.read_text(encoding="utf-8"))
 
 
+def validate_workflow(workflow_id: str) -> list[str]:
+    """
+    Validate a workflow's JSON against ComfyUI's installed nodes.
+    Uses comfyui_nodes.py to query /object_info and check every node type.
+
+    Returns list of error strings. Empty = valid.
+    Raises ValueError if workflow_id not in registry.
+    Raises FileNotFoundError if the .json file is missing.
+    """
+    wf = load_workflow(workflow_id)
+
+    from comfyui_nodes import validate_workflow as _validate_ui
+    from comfyui_nodes import validate_workflow_api_format as _validate_api
+
+    # Detect format: API format has string keys with class_type
+    if isinstance(wf, dict) and any(
+        isinstance(v, dict) and "class_type" in v
+        for v in wf.values()
+        if isinstance(v, dict)
+    ):
+        return _validate_api(wf)
+    return _validate_ui(wf)
+
+
 def reload() -> None:
     """Rescan workflows/ directory and update the in-memory registry."""
     global _REGISTRY
@@ -108,7 +138,23 @@ def reload() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+
     reload()
     for w in _REGISTRY:
         status = "OK" if w.has_json else "NO JSON"
         print(f"  [{w.stage:12s}] {w.name:35s} [{status}]")
+
+    # If --validate flag, validate all workflows with JSON against live ComfyUI
+    if "--validate" in sys.argv:
+        print("\nValidating workflows against ComfyUI...")
+        for w in _REGISTRY:
+            if not w.has_json:
+                continue
+            errors = validate_workflow(w.id)
+            if errors:
+                print(f"  {w.id}: INVALID")
+                for e in errors:
+                    print(f"    {e}")
+            else:
+                print(f"  {w.id}: VALID")
