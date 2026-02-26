@@ -239,8 +239,8 @@ async function populateShots() {
 async function loadShot(shotName) {
   showLoading("Fetching scene data…");
 
-  // Clear previous scene
-  sceneGroup.removeFromParent();
+  // Clear previous scene (scene.remove works in all Three.js versions)
+  scene.remove(sceneGroup);
   sceneGroup = new THREE.Group();
   scene.add(sceneGroup);
   frustums = [];
@@ -668,7 +668,13 @@ document.addEventListener("keydown", (e) => {
       shotSelect.appendChild(opt);
       shotSelect.value = urlShot;
     }
-    await loadShot(urlShot);
+    try {
+      await loadShot(urlShot);
+    } catch (e) {
+      console.error("loadShot failed:", e);
+      statusMsg.textContent = "Load failed: " + e.message;
+      hideLoading();
+    }
   } else if (shotSelect.value) {
     // Standalone: auto-load first shot
     hideLoading();
