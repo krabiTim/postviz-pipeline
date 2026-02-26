@@ -70,12 +70,13 @@
     box-shadow: 0 0 4px #06f;
   }
   #frame-label { font-size: 11px; color: #888; white-space: nowrap; min-width: 80px; }
-  #reset-btn {
+  #reset-btn, #follow-btn {
     background: #1a1a1a; border: 1px solid #444; color: #999;
     padding: 3px 8px; font-family: monospace; font-size: 11px;
     border-radius: 3px; cursor: pointer;
   }
-  #reset-btn:hover { background: #2a2a2a; }
+  #reset-btn:hover, #follow-btn:hover { background: #2a2a2a; }
+  #follow-btn.active { border-color: #6af; color: #6af; background: #0a1a2a; }
 
   /* Loading overlay */
   #loading {
@@ -130,6 +131,7 @@
   <input type="range" id="scrubber" min="0" max="100" value="0" step="1">
   <span id="frame-label">0 / 0</span>
   <button id="reset-btn">RESET CAM</button>
+  <button id="follow-btn">FOLLOW CAM</button>
 </div>
 
 <div id="loading">
@@ -195,6 +197,7 @@ let activeFrustum = null;
 // ── Animation state ───────────────────────────────────────────────────────────
 
 let playing    = false;
+let followCam  = false;
 let currentFrame = 0;
 let lastTime   = null;
 let fps        = 24.0;
@@ -208,6 +211,7 @@ const scrubber    = document.getElementById("scrubber");
 const frameLabel  = document.getElementById("frame-label");
 const playBtn     = document.getElementById("play-btn");
 const resetBtn    = document.getElementById("reset-btn");
+const followBtn   = document.getElementById("follow-btn");
 const loadingDiv  = document.getElementById("loading");
 const loadingMsg  = document.getElementById("loading-msg");
 
@@ -242,6 +246,9 @@ async function loadShot(shotName) {
   // Clear previous scene (scene.remove works in all Three.js versions)
   scene.remove(sceneGroup);
   sceneGroup = new THREE.Group();
+  // COLMAP is Y-down / Z-forward (OpenCV). Three.js is Y-up / Z-toward-viewer.
+  // Flip Y and Z on the group so all scene content renders right-side up.
+  sceneGroup.scale.set(1, -1, -1);
   scene.add(sceneGroup);
   frustums = [];
   activeFrustum = null;
@@ -337,15 +344,18 @@ async function buildScene(sceneData) {
       cx += f.position[0]; cy += f.position[1]; cz += f.position[2];
     }
     const n = registeredFrames.length;
-    const centre = new THREE.Vector3(cx/n, cy/n, cz/n);
-    controls.target.copy(centre);
+    const cxA = cx/n, cyA = cy/n, czA = cz/n;
 
-    // Estimate scene span to set camera distance
+    // Span in COLMAP space
     let maxD = 0;
     for (const f of registeredFrames) {
-      const d = new THREE.Vector3(f.position[0], f.position[1], f.position[2]).distanceTo(centre);
-      if (d > maxD) maxD = d;
+      const dx = f.position[0]-cxA, dy = f.position[1]-cyA, dz = f.position[2]-czA;
+      maxD = Math.max(maxD, Math.sqrt(dx*dx + dy*dy + dz*dz));
     }
+
+    // Centre and camera in Three.js world coords (Y and Z flipped to match sceneGroup)
+    const centre = new THREE.Vector3(cxA, -cyA, -czA);
+    controls.target.copy(centre);
     const dist = Math.max(maxD * 2.5, 2);
     camera.position.set(centre.x, centre.y + dist * 0.5, centre.z + dist);
     controls.update();
@@ -540,6 +550,25 @@ function setFrame(idx) {
     document.getElementById("ip-frame").textContent = `${idx + 1} / ${totalFrames}`;
     document.getElementById("ip-reg2").textContent  = fd.registered ? "YES" : "—";
   }
+
+  // Follow-camera: snap Three.js camera to COLMAP pose for this frame.
+  // COLMAP world → Three.js world: flip Y and Z (OpenCV→OpenGL convention).
+  // rotation_matrix (R^T) rows are camera basis vectors in COLMAP world space:
+  //   R^T[0] = right,  R^T[1] = down,  R^T[2] = forward (into scene)
+  if (followCam && fd && fd.registered && fd.position && fd.rotation_matrix) {
+    const pos  = fd.position;
+    const rotT = fd.rotation_matrix;
+    camera.position.set(pos[0], -pos[1], -pos[2]);
+    // Up in Three.js = -R^T[1] (COLMAP Y is down), with Y/Z flip applied
+    camera.up.set(-rotT[1][0], rotT[1][1], rotT[1][2]);
+    // Look-at = camera pos + forward direction (R^T[2]), Y/Z flipped
+    camera.lookAt(
+      pos[0] + rotT[2][0],
+      -pos[1] - rotT[2][1],
+      -pos[2] - rotT[2][2]
+    );
+    controls.enabled = false;
+  }
 }
 
 function updateFrameLabel(idx) {
@@ -640,7 +669,21 @@ scrubber.addEventListener("input", () => {
 playBtn.addEventListener("click", togglePlay);
 
 resetBtn.addEventListener("click", () => {
+  followCam = false;
+  followBtn.classList.remove("active");
+  controls.enabled = true;
   controls.reset();
+});
+
+followBtn.addEventListener("click", () => {
+  followCam = !followCam;
+  followBtn.classList.toggle("active", followCam);
+  if (!followCam) {
+    controls.enabled = true;
+    controls.update();
+  } else {
+    setFrame(currentFrame);  // immediately snap to current frame's pose
+  }
 });
 
 // Keyboard shortcuts
