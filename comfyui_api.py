@@ -142,6 +142,18 @@ def download_outputs(prompt_id: str, output_dir: str, url: str = COMFYUI_URL) ->
     return saved
 
 
+def _load_workflow(workflow_id: str) -> dict:
+    """Load a workflow JSON by ID from the workflow registry, with fallback to direct path."""
+    try:
+        from workflow_registry import load_workflow
+        return load_workflow(workflow_id)
+    except (ValueError, FileNotFoundError):
+        workflow_path = Path(__file__).parent / "workflows" / f"{workflow_id}.json"
+        if workflow_path.exists():
+            return json.loads(workflow_path.read_text())
+        raise
+
+
 def run_sam2_mask(
     frames_dir: str,
     click_x: float,
@@ -169,10 +181,8 @@ def run_sam2_mask(
 
     first_frame = str(frame_files[0])
 
-    # Load workflow
-    workflow_path = Path(__file__).parent / "workflows" / "sam2_mask.json"
-    with open(workflow_path) as f:
-        workflow = json.load(f)
+    # Load workflow from registry
+    workflow = _load_workflow("sam2_mask")
 
     # Upload first frame
     server_filename = upload_image(first_frame, comfyui_url)
@@ -211,18 +221,15 @@ def generate_backgrounds(
     mask_path: str,
     prompt: str,
     num_variants: int = 3,
+    workflow_id: str = "bg_flux_inpaint",
     comfyui_url: str = COMFYUI_URL,
 ) -> list[str]:
     """
     Generate background variants using FLUX/SDXL inpainting behind the mask.
+    workflow_id: 'bg_flux_inpaint' (FLUX Fill) or 'bg_generate' (legacy SDXL).
     Returns list of paths to generated background images.
     """
-    from pathlib import Path
-    import tempfile
-
-    workflow_path = Path(__file__).parent / "workflows" / "bg_generate.json"
-    with open(workflow_path) as f:
-        workflow = json.load(f)
+    workflow = _load_workflow(workflow_id)
 
     frame_filename = upload_image(key_frame_path, comfyui_url)
     mask_filename = upload_image(mask_path, comfyui_url)
@@ -240,6 +247,12 @@ def generate_backgrounds(
                     inp["image"] = mask_filename
             if ct in ("CLIPTextEncode", "Text Encode") and "__PROMPT__" in str(node["inputs"]):
                 node["inputs"]["text"] = prompt
+            if ct == "CLIPTextEncodeFlux" and "__PROMPT__" in str(node["inputs"]):
+                inp = node["inputs"]
+                if inp.get("clip_l") == "__PROMPT__":
+                    inp["clip_l"] = prompt
+                if inp.get("t5xxl") == "__PROMPT__":
+                    inp["t5xxl"] = prompt
             if ct == "KSampler":
                 node["inputs"]["seed"] = i * 1000 + 42
 
@@ -260,9 +273,7 @@ def apply_relight(
     comfyui_url: str = COMFYUI_URL,
 ) -> str:
     """Run IC-Light workflow to relight FG to match BG. Return path to relighted image."""
-    workflow_path = Path(__file__).parent / "workflows" / "relight.json"
-    with open(workflow_path) as f:
-        workflow = json.load(f)
+    workflow = _load_workflow("relight_iclight")
 
     fg_filename = upload_image(fg_frame_path, comfyui_url)
     mask_filename = upload_image(mask_path, comfyui_url)

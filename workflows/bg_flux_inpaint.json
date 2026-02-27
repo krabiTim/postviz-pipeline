@@ -1,0 +1,121 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-fill-dev.safetensors",
+      "weight_dtype": "fp8_e4m3fn"
+    },
+    "_meta": { "title": "Load FLUX Fill Model" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp16.safetensors",
+      "type": "flux"
+    },
+    "_meta": { "title": "Load CLIP (FLUX)" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "_meta": { "title": "Load VAE (FLUX)" }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__FRAME__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Source Frame" }
+  },
+  "5": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__MASK__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Mask Image" }
+  },
+  "6": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": ["5", 0],
+      "channel": "red"
+    },
+    "_meta": { "title": "Mask Image to Mask" }
+  },
+  "7": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": ["6", 0]
+    },
+    "_meta": { "title": "Invert Mask (FG→BG region)" }
+  },
+  "8": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["2", 0],
+      "clip_l": "__PROMPT__",
+      "t5xxl": "__PROMPT__",
+      "guidance": 30.0
+    },
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "9": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["2", 0],
+      "clip_l": "",
+      "t5xxl": "",
+      "guidance": 30.0
+    },
+    "_meta": { "title": "Negative (empty)" }
+  },
+  "10": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": ["8", 0],
+      "negative": ["9", 0],
+      "vae": ["3", 0],
+      "pixels": ["4", 0],
+      "mask": ["7", 0],
+      "noise_mask": true
+    },
+    "_meta": { "title": "Inpaint Model Conditioning" }
+  },
+  "11": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["10", 0],
+      "negative": ["10", 1],
+      "latent_image": ["10", 2],
+      "seed": 42,
+      "steps": 28,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "_meta": { "title": "KSampler (FLUX Fill)" }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["3", 0]
+    },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["12", 0],
+      "filename_prefix": "bg_flux"
+    },
+    "_meta": { "title": "Save Background" }
+  }
+}

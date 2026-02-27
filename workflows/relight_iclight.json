@@ -1,0 +1,135 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "epicrealismXL_vxviiCrystalclear.safetensors"
+    },
+    "_meta": { "title": "Load SD Checkpoint" }
+  },
+  "2": {
+    "class_type": "LoadAndApplyICLightUnet",
+    "inputs": {
+      "model": ["1", 0],
+      "model_path": "iclight_sd15_fc.safetensors"
+    },
+    "_meta": { "title": "Load IC-Light FC" }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__FG__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Foreground" }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__MASK__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Mask" }
+  },
+  "5": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": ["4", 0],
+      "channel": "red"
+    },
+    "_meta": { "title": "Mask Image to Mask" }
+  },
+  "6": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__BG__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Background" }
+  },
+  "7": {
+    "class_type": "BackgroundScaler",
+    "inputs": {
+      "image": ["6", 0],
+      "mask": ["5", 0],
+      "scale": 1.0,
+      "invert": false
+    },
+    "_meta": { "title": "Scale Background" }
+  },
+  "8": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["3", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": { "title": "Encode Foreground" }
+  },
+  "9": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["7", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": { "title": "Encode Background" }
+  },
+  "10": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "professional photograph, cinematic lighting, natural shadows, detailed skin texture, photorealistic"
+    },
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "11": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "ugly, deformed, blurry, low quality, overexposed, underexposed, flat lighting"
+    },
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "12": {
+    "class_type": "ICLightConditioning",
+    "inputs": {
+      "positive": ["10", 0],
+      "negative": ["11", 0],
+      "vae": ["1", 2],
+      "foreground": ["8", 0],
+      "multiplier": 0.18215,
+      "opt_background": ["9", 0]
+    },
+    "_meta": { "title": "IC-Light Conditioning" }
+  },
+  "13": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["2", 0],
+      "positive": ["12", 0],
+      "negative": ["12", 1],
+      "latent_image": ["12", 2],
+      "seed": 42,
+      "steps": 20,
+      "cfg": 2.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.45
+    },
+    "_meta": { "title": "KSampler (IC-Light)" }
+  },
+  "14": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["13", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "15": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["14", 0],
+      "filename_prefix": "relight"
+    },
+    "_meta": { "title": "Save Relighted" }
+  }
+}

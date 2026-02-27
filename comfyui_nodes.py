@@ -151,8 +151,8 @@ def search_nodes(
     results = []
 
     for class_name, spec in nodes.items():
-        display = spec.get("display_name", class_name)
-        cat = spec.get("category", "")
+        display = spec.get("display_name") or class_name
+        cat = spec.get("category") or ""
 
         if category and category.lower() not in cat.lower():
             continue
