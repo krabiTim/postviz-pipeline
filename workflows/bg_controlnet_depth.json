@@ -1,0 +1,157 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-dev-fp8.safetensors",
+      "weight_dtype": "fp8_e4m3fn"
+    },
+    "_meta": { "title": "Load FLUX Dev Model" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp16.safetensors",
+      "type": "flux"
+    },
+    "_meta": { "title": "Load CLIP (FLUX)" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "_meta": { "title": "Load VAE (FLUX)" }
+  },
+  "4": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "FLUX.1/InstantX-FLUX1-Dev-Union/diffusion_pytorch_model.safetensors"
+    },
+    "_meta": { "title": "Load Union ControlNet" }
+  },
+  "5": {
+    "class_type": "SetUnionControlNetType",
+    "inputs": {
+      "control_net": ["4", 0],
+      "type": "depth"
+    },
+    "_meta": { "title": "Set ControlNet Type: Depth" }
+  },
+  "6": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__FRAME__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Source Frame" }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__MASK__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Mask Image" }
+  },
+  "8": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": ["7", 0],
+      "channel": "red"
+    },
+    "_meta": { "title": "Mask Image to Mask" }
+  },
+  "9": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": ["8", 0]
+    },
+    "_meta": { "title": "Invert Mask (FG→BG region)" }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__DEPTH__",
+      "upload": "image"
+    },
+    "_meta": { "title": "Load Depth Map" }
+  },
+  "11": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["2", 0],
+      "clip_l": "__PROMPT__",
+      "t5xxl": "__PROMPT__",
+      "guidance": 30.0
+    },
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "12": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["2", 0],
+      "clip_l": "",
+      "t5xxl": "",
+      "guidance": 30.0
+    },
+    "_meta": { "title": "Negative (empty)" }
+  },
+  "13": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["11", 0],
+      "negative": ["12", 0],
+      "control_net": ["5", 0],
+      "image": ["10", 0],
+      "strength": 0.7,
+      "start_percent": 0.0,
+      "end_percent": 1.0
+    },
+    "_meta": { "title": "Apply Depth ControlNet" }
+  },
+  "14": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": ["13", 0],
+      "negative": ["13", 1],
+      "vae": ["3", 0],
+      "pixels": ["6", 0],
+      "mask": ["9", 0],
+      "noise_mask": true
+    },
+    "_meta": { "title": "Inpaint Model Conditioning" }
+  },
+  "15": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["14", 0],
+      "negative": ["14", 1],
+      "latent_image": ["14", 2],
+      "seed": 42,
+      "steps": 28,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "_meta": { "title": "KSampler (FLUX Dev)" }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["15", 0],
+      "vae": ["3", 0]
+    },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "17": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["16", 0],
+      "filename_prefix": "bg_depth"
+    },
+    "_meta": { "title": "Save Background" }
+  }
+}

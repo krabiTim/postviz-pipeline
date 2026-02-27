@@ -1,0 +1,92 @@
+{
+  "1": {
+    "class_type": "WanVideoModelLoader",
+    "inputs": {
+      "model": "Wan2.2/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+      "base_precision": "bf16",
+      "quantization": "disabled",
+      "load_device": "offload_device"
+    },
+    "_meta": { "title": "Load Wan 2.2 T2V Model" }
+  },
+  "2": {
+    "class_type": "WanVideoVAELoader",
+    "inputs": {
+      "model_name": "Wan2_1_VAE_bf16.safetensors",
+      "precision": "bf16"
+    },
+    "_meta": { "title": "Load Wan VAE" }
+  },
+  "3": {
+    "class_type": "LoadWanVideoT5TextEncoder",
+    "inputs": {
+      "model_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "precision": "bf16",
+      "load_device": "offload_device",
+      "quantization": "disabled"
+    },
+    "_meta": { "title": "Load Wan T5 Text Encoder" }
+  },
+  "4": {
+    "class_type": "WanVideoTextEncode",
+    "inputs": {
+      "positive_prompt": "__PROMPT__",
+      "negative_prompt": "blurry, low quality, distorted, watermark",
+      "t5": ["3", 0],
+      "force_offload": true,
+      "model_to_offload": ["1", 0]
+    },
+    "_meta": { "title": "Encode Text Prompts" }
+  },
+  "5": {
+    "class_type": "WanVideoEmptyEmbeds",
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "num_frames": 81
+    },
+    "_meta": { "title": "Empty T2V Embeds (__FRAME_COUNT__ frames)" }
+  },
+  "6": {
+    "class_type": "WanVideoSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "image_embeds": ["5", 0],
+      "text_embeds": ["4", 0],
+      "steps": 30,
+      "cfg": 6.0,
+      "shift": 5.0,
+      "seed": 42,
+      "force_offload": true,
+      "scheduler": "unipc",
+      "riflex_freq_index": 0
+    },
+    "_meta": { "title": "WanVideo Sampler" }
+  },
+  "7": {
+    "class_type": "WanVideoDecode",
+    "inputs": {
+      "vae": ["2", 0],
+      "samples": ["6", 0],
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128
+    },
+    "_meta": { "title": "WanVideo Decode → Frames" }
+  },
+  "8": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["7", 0],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "wan_bg",
+      "format": "video/h264-mp4",
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": { "title": "Combine Frames → MP4" }
+  }
+}
